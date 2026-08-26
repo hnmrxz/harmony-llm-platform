@@ -6,178 +6,182 @@
 
 > **本项目不负责模型转换。HarmonyOS 端只负责模型导入、验证、安装、管理和本地推理。**
 
-## Core Goal
-
-让用户能够把一个已经完成转换的 `.hllm` 模型文件导入 HarmonyOS 设备，然后直接使用设备侧 CANN/NPU 完成本地大语言模型推理。
+## 一、用户完整使用流程
 
 ```text
-.hllm
+Ubuntu
   ↓
-Import
+生成 .hllm
   ↓
-Integrity Check
+复制 / 上传到 HarmonyOS
   ↓
-Manifest Parse
+Runtime 导入
   ↓
-Device Compatibility Check
+SHA-256 / Manifest 校验
   ↓
-Install
+设备兼容性检查
   ↓
-Tokenizer
+安装
   ↓
-CANN / NPU Runtime
+Tokenizer / Prompt
   ↓
-Streaming Inference
+Native Runtime
   ↓
-Chat UI
+CANN / NNRt / NPU
+  ↓
+流式输出
 ```
 
-## Strict Boundary
-
-HarmonyOS Runtime **不包含**：
-
-- Hugging Face 下载
-- Transformers
-- PyTorch 模型转换
-- 模型量化
-- ONNX 导出
-- CANN 模型转换/编译
-- 为模型转换而部署完整 Python 环境
-
-这些职责全部属于 `harmony-llm-converter/`。
-
-Runtime 唯一关心的是：
+Runtime 用户不需要安装：
 
 ```text
-给我一个 .hllm
-→ 我判断能不能在当前设备运行
-→ 能就安装
-→ 然后调用本地 NPU 推理
+Python
+PyTorch
+Transformers
+ONNX
+CANN Converter
 ```
 
-## Supported Model Input
+## 二、支持的输入
 
-第一版只接受统一模型包：
+普通用户入口只接受：
 
 ```text
 *.hllm
 ```
 
-不建议直接让 Runtime 暴露以下底层文件作为普通用户入口：
+不建议直接把以下文件交给 Runtime：
 
 ```text
+*.safetensors
 *.onnx
 *.om
 *.omc
 *.bin
-*.safetensors
 ```
 
-如果用户只有这些文件，应先通过 Ubuntu Converter 生成 `.hllm`。
+这些底层文件应先由 Ubuntu Converter 整理成符合 HLLM Package Contract 的 `.hllm`。
 
-## Runtime Architecture
+## 三、导入模型
+
+### 本地文件导入
+
+典型流程：
 
 ```text
-┌──────────────────────────────────────┐
-│ HarmonyOS UI / ArkUI                 │
-│                                      │
-│ Home / Models / Import / Chat        │
-└──────────────────┬───────────────────┘
-                   │
-                   ▼
-┌──────────────────────────────────────┐
-│ Application Services                 │
-│                                      │
-│ ModelService / RuntimeService        │
-│ DeviceService / TransferService      │
-└──────────────────┬───────────────────┘
-                   │
-                   ▼
-┌──────────────────────────────────────┐
-│ Native Runtime Layer                 │
-│                                      │
-│ ModelLoader / Tokenizer / Sampler    │
-│ KV Cache / Inference                 │
-└──────────────────┬───────────────────┘
-                   │
-                   ▼
-┌──────────────────────────────────────┐
-│ CANN / Hardware Backend              │
-└──────────────────┬───────────────────┘
-                   │
-                   ▼
-                 NPU
+模型中心
+ → 导入模型
+ → 选择 .hllm
+ → 校验
+ → 安装
 ```
 
-ArkTS 负责界面和应用业务；Native/C++ 层负责模型加载、Tokenizer、推理以及与底层 AI Runtime 的连接。
+导入时不得直接覆盖正在使用的模型。
 
-## Model Import
-
-第一阶段支持：
-
-### Local Import
+推荐安装流程：
 
 ```text
-选择 .hllm
-   ↓
-复制/安装到模型目录
+Temporary Import
+      ↓
+Integrity Check
+      ↓
+Compatibility Check
+      ↓
+Atomic Install
+      ↓
+READY
 ```
 
-### LAN Transfer
+### 从 Ubuntu 传输
 
-后续可以让 Ubuntu Converter 提供局域网服务：
+后续支持局域网模式：
 
 ```text
-Ubuntu
-  │
-  │ LAN
-  ▼
+Ubuntu Converter
+       │
+       │ LAN
+       ▼
 HarmonyOS Runtime
 ```
 
-用户可以直接从 Ubuntu 的模型列表选择已经生成的模型，无需手工复制文件。
+Ubuntu 负责提供已完成的 `.hllm`；HarmonyOS 只下载该文件并执行与本地导入相同的校验流程。
 
-### HTTP/HTTPS
+## 四、安装前检查
 
-后续可以扩展远程模型服务器，但必须经过完整性校验后才能安装。
-
-## Model Installation
-
-导入模型后严格按照以下顺序处理：
+Runtime 必须按顺序执行：
 
 ```text
-1. File exists
-2. Archive readable
-3. Manifest readable
-4. Schema supported
-5. Artifact checksum valid
-6. Model metadata valid
-7. Tokenizer files valid
-8. Device compatibility valid
-9. Storage capacity valid
-10. Install
+1. 文件存在
+2. HLLM archive 可读取
+3. manifest.json 可解析
+4. schema_version 支持
+5. artifact 存在
+6. SHA-256 正确
+7. tokenizer 资源完整
+8. target chip 匹配
+9. Runtime/CANN 版本匹配
+10. NPU / memory / storage 资源满足要求
 ```
 
-任何一步失败，都不能进入运行状态。
+任何一步失败，模型不能进入 `READY`。
 
-## Device Compatibility
+## 五、模型状态
 
-Runtime 必须先获取设备能力信息，再判断模型是否可以安装/运行。
+推荐状态机：
 
-建议抽象为：
+```text
+IMPORTED
+   ↓
+VALIDATING
+   ↓
+INSTALLED
+   ↓
+READY
+   ↓
+RUNNING
+   ↓
+READY
+```
+
+异常状态：
+
+```text
+ERROR
+INCOMPATIBLE
+```
+
+模型升级建议采用双目录或临时目录：
+
+```text
+model-v1
+model-v2.tmp
+    ↓
+validate
+    ↓
+atomic switch
+    ↓
+model-v2
+```
+
+这样新模型失败时不会破坏旧模型。
+
+## 六、设备能力检测
+
+安装和启动前都应获取 `DeviceProfile`：
 
 ```text
 DeviceProfile
 ├── HarmonyOS version
+├── device model
 ├── chip
 ├── NPU availability
-├── memory
+├── RAM
 ├── storage
-├── CANN/runtime version
-└── supported model formats
+├── runtime/CANN version
+└── supported offline model formats
 ```
 
-模型 Manifest 则声明：
+模型包则提供 `ModelRequirements`：
 
 ```text
 ModelRequirements
@@ -189,17 +193,7 @@ ModelRequirements
 └── artifact format
 ```
 
-然后执行：
-
-```text
-DeviceProfile
-      ×
-ModelRequirements
-      ↓
-Compatibility Result
-```
-
-结果至少分为：
+最终结果：
 
 ```text
 COMPATIBLE
@@ -207,266 +201,434 @@ COMPATIBLE_WITH_LIMITS
 INCOMPATIBLE
 ```
 
-对于不兼容模型，应明确告诉用户原因，而不是只显示“模型无法运行”。
-
-## Model Manager
-
-模型中心负责：
-
-- 已安装模型
-- 模型详情
-- 模型大小
-- 量化方式
-- 目标芯片
-- 上下文长度
-- Runtime/CANN 要求
-- 启动/停止
-- 删除
-- 升级
-- 重新验证
-
-建议模型状态：
+错误必须说明原因，例如：
 
 ```text
-IMPORTED
-VALIDATING
-INSTALLED
-READY
-RUNNING
-ERROR
-INCOMPATIBLE
+目标芯片不匹配
+CANN Runtime 版本过低
+NPU 内存不足
+上下文长度超出当前设备建议值
+不支持所需 artifact format
 ```
 
-## Tokenizer
+## 七、Qwen3.8-27B 运行注意事项
 
-Tokenizer 是 Runtime 的一等组件。
+Qwen3.8-27B 是本项目当前核心目标，但它是大模型/多模态模型。
 
-模型包必须包含运行所需的 tokenizer 与相关配置，并保留模型自己的 Chat Template 信息。
+第一阶段应将能力明确拆成：
 
-推理链路：
+```text
+Text LLM
+  └── 第一优先级
+
+Vision
+  └── 后续独立验证
+
+Video
+  └── 后续独立验证
+```
+
+因此：
+
+> Runtime 能够运行 Qwen3.8-27B 的文本路径，不等于视觉和视频输入路径已经支持。
+
+另外，是否可以运行 27B 不由“27B”这个数字单独决定，而取决于：
+
+```text
+target chip
+NPU memory
+runtime version
+quantization
+context length
+operator support
+```
+
+## 八、Tokenizer 与 Chat Template
+
+Tokenizer 是 Runtime 的核心组件，不可以只依赖默认规则。
+
+模型包应提供：
+
+```text
+tokenizer.json / tokenizer.model
+tokenizer_config.json
+special tokens
+chat template
+model config
+```
+
+完整链路：
 
 ```text
 User Message
-    ↓
+      ↓
+Conversation State
+      ↓
 Chat Template
-    ↓
+      ↓
 Tokenizer
-    ↓
+      ↓
 Input IDs
-    ↓
-CANN/NPU
-    ↓
+      ↓
+Native Runtime
+      ↓
+CANN / NPU
+      ↓
 Token IDs
-    ↓
+      ↓
 Tokenizer Decode
-    ↓
+      ↓
 Streaming Text
 ```
 
-Runtime 不应该假设所有模型使用相同的 Prompt 格式。
+每个模型的 Chat Template 都可能不同，因此 Runtime 不能硬编码 Qwen prompt 给所有模型共用。
 
-## Inference Runtime
+## 九、推理 API
 
-第一阶段重点实现：
-
-- 单会话聊天
-- 流式 token 输出
-- temperature
-- top-p
-- max tokens
-- stop conditions
-- context management
-- KV cache
-- cancel generation
-
-推理层应该保持与 UI 解耦：
+Native Runtime 建议提供稳定接口：
 
 ```text
-Chat UI
-   ↓
-Inference API
-   ↓
-Runtime
-   ↓
-CANN
+loadModel(modelId)
+unloadModel(modelId)
+createSession(modelId)
+appendMessage(sessionId, role, content)
+generate(sessionId, options)
+cancel(sessionId)
+reset(sessionId)
 ```
 
-## Security and Integrity
+生成参数至少支持：
 
-模型包安装前必须验证：
+```text
+temperature
+top_p
+max_tokens
+stop sequences
+context length
+```
 
-- SHA256 / Manifest integrity
-- Artifact presence
-- Manifest schema
-- Model metadata
+UI 与 Native Runtime 通过异步事件流通信：
 
-后续应支持模型包签名，例如：
+```text
+GENERATE_STARTED
+TOKEN
+TOKEN
+TOKEN
+GENERATE_COMPLETED
+```
+
+错误事件：
+
+```text
+MODEL_LOAD_FAILED
+OUT_OF_MEMORY
+UNSUPPORTED_OPERATOR
+RUNTIME_ERROR
+CANCELLED
+```
+
+## 十、HarmonyOS 工程边界
+
+推荐：
+
+```text
+ArkUI / ArkTS
+     ↓
+Application Services
+     ↓
+NAPI / Native Bridge
+     ↓
+C++ Runtime
+     ↓
+CANN / NNRt Backend
+     ↓
+NPU
+```
+
+ArkTS 负责：
+
+- 页面
+- 模型列表
+- 导入
+- 安装进度
+- Chat UI
+- 设置
+- 错误展示
+
+C++/Native 负责：
+
+- HLLM package access
+- tokenizer bridge
+- model loader
+- tensor/session management
+- generation
+- KV cache
+- CANN/NNRt calls
+
+不要把模型转换逻辑放进 ArkTS。
+
+## 十一、模型管理
+
+模型中心至少显示：
+
+```text
+Model Name
+Model Family
+Quantization
+Package Size
+Target Chip
+Runtime Version
+Context Length
+Compatibility
+Status
+```
+
+操作：
+
+```text
+导入
+验证
+安装
+启动
+停止
+删除
+升级
+重新验证
+```
+
+## 十二、存储管理
+
+模型文件可能非常大，因此安装流程必须使用临时空间和原子切换：
 
 ```text
 .hllm
-  ↓
+ ↓
+/tmp/import/model.hllm
+ ↓
+verify
+ ↓
+extract
+ ↓
+verify artifacts
+ ↓
+install
+ ↓
+READY
+```
+
+必须检查：
+
+- package size
+- extracted size
+- free space
+- temporary space
+
+删除模型时确认模型没有处于 `RUNNING`。
+
+## 十三、完整性和安全
+
+Runtime 必须验证：
+
+```text
+manifest.json
+schema version
+artifact presence
+SHA-256
+```
+
+后续增加数字签名：
+
+```text
+.hllm
+ ↓
 Signature Verify
-  ↓
+ ↓
 Trusted Publisher
-  ↓
+ ↓
 Install
 ```
 
-不应默认执行模型包中任何脚本或可执行文件。
+绝不因为模型包中存在某个脚本文件而自动执行该脚本。
 
-## Storage Management
+## 十四、常见导入问题
 
-模型可能非常大，因此 Model Manager 必须具备：
+### `PACKAGE_INVALID`
 
-- 可用空间检测
-- 安装前空间预估
-- 临时文件管理
-- 原子安装
-- 失败回滚
-- 模型删除
-- 缓存清理
-
-不要在模型尚未完成校验时覆盖现有可用模型。
-
-## Error Model
-
-Runtime 应提供结构化错误，例如：
+通常检查：
 
 ```text
-PACKAGE_INVALID
-MANIFEST_UNSUPPORTED
-CHECKSUM_FAILED
-TOKENIZER_INVALID
-DEVICE_UNSUPPORTED
-CANN_VERSION_UNSUPPORTED
-INSUFFICIENT_MEMORY
-INSUFFICIENT_STORAGE
-MODEL_LOAD_FAILED
-INFERENCE_FAILED
+.hllm 是否完整
+manifest.json 是否存在
+ZIP 是否损坏
 ```
 
-用户界面同时显示人类可读的解释和必要的诊断信息。
+### `CHECKSUM_FAILED`
 
-## Recommended UI
+模型传输过程中被改变或包生成时的 artifact 已经不同。
 
-### Home
+重新从 Converter 复制 `.hllm`，不要手工替换包内文件。
+
+### `DEVICE_UNSUPPORTED`
+
+检查：
 
 ```text
-HarmonyOS LLM
-
-Installed Models
-
-Qwen3-1.7B INT4
-✓ Ready
-
-[Chat]
-
-[Import Model]
+manifest.target.chip
+DeviceProfile.chip
 ```
 
-### Import
+### `CANN_VERSION_UNSUPPORTED`
+
+模型是在特定版本 CANN 环境转换的，Runtime 的离线模型兼容条件可能不同。应使用目标设备对应的 target profile 重新转换。
+
+### `INSUFFICIENT_MEMORY`
+
+可尝试：
 
 ```text
-Import HarmonyOS Model
-
-[ Select .hllm ]
-
-Model: Qwen3-1.7B
-Target: Kirin ...
-Quantization: INT4
-
-Compatibility: Checking...
-
-[Install]
+更小模型
+更低 context length
+更合适的量化 profile
 ```
 
-### Model Detail
+但不能仅靠减少 UI 配置绕过模型本身的 NPU 内存需求。
+
+## 十五、模型启动
+
+推荐模型启动流程：
 
 ```text
-Qwen3-1.7B
-
-INT4
-Target: ...
-Context: 8192
-
-Device: Compatible
-Storage: OK
-Runtime: OK
-
-[Start]
-[Delete]
+Select Model
+    ↓
+Re-check Compatibility
+    ↓
+Load Tokenizer
+    ↓
+Load Offline Model
+    ↓
+Create Session
+    ↓
+READY
 ```
 
-### Chat
+真正开始生成时：
 
 ```text
-Model: Qwen3-1.7B INT4
-
-User: 你好
-
-Assistant: 你好！……
-
-[Stop]
+Prompt
+ ↓
+Tokenize
+ ↓
+Runtime Execute
+ ↓
+NPU
+ ↓
+Decode
+ ↓
+UI Stream
 ```
 
-## Project Layout
+## 十六、性能与 Benchmark
+
+Runtime 应记录：
 
 ```text
-harmony-llm-runtime/
-├── README.md
-├── entry/
-├── ets/
-│   ├── pages/
-│   ├── components/
-│   └── services/
-├── native/
-│   ├── runtime/
-│   └── backends/
-│       └── cann/
-├── resources/
-└── tests/
+first token latency
+prompt tokens/sec
+generation tokens/sec
+peak memory
+context length
+load time
+model size
 ```
 
-实际 HarmonyOS 工程结构以当前 SDK/DevEco Studio 工程模板和目标 HarmonyOS API 版本为准。
+不要只记录“聊天是否成功”。
 
-## Roadmap
+后续可以对同一个 `.hllm` 在不同 HarmonyOS 设备上建立 benchmark 表。
 
-### Phase 1 — Runtime MVP
+## 十七、开发与测试
 
-- `.hllm` 导入
-- Manifest 解析
-- SHA256 校验
-- 设备能力检测
-- 模型安装
-- Tokenizer
-- CANN/NPU 基础推理
-- 流式聊天
+HarmonyOS Runtime 开发时至少建立：
 
-### Phase 2 — Model Management
+```text
+Package Parser Test
+Manifest Test
+Checksum Test
+Compatibility Test
+Model Manager Test
+Tokenizer Test
+Native Backend Test
+Inference Test
+```
 
-- 模型列表
-- 模型详情
-- 删除/升级
-- 存储管理
-- 失败回滚
-- 更完整的兼容性诊断
+其中 Native/CANN 真机测试不能由模拟器结果代替。真实 NPU 兼容性必须使用对应设备验证。
 
-### Phase 3 — Transfer
+## 十八、当前项目边界
 
-- Ubuntu Converter 局域网发现
-- LAN 模型传输
-- HTTP/HTTPS 模型服务器
-- 断点续传
+### Runtime 做
 
-### Phase 4 — Runtime Ecosystem
+```text
+.hllm
+ ↓
+Verify
+ ↓
+Install
+ ↓
+Tokenizer
+ ↓
+Native Runtime
+ ↓
+CANN / NNRt / NPU
+```
 
-- 多模型并存
-- 多会话
-- Benchmark
-- 更多模型类型
-- VLM / Embedding / Reranker 等运行时能力
+### Runtime 不做
 
-## Compatibility Contract
+```text
+Hugging Face
+ ↓
+Transformers
+ ↓
+Quantization
+ ↓
+ONNX Export
+ ↓
+CANN Convert
+```
+
+这些全部由 Ubuntu Converter 完成。
+
+## 十九、推荐用户操作手册
+
+普通用户：
+
+```text
+1. 获取一个 .hllm
+2. 打开 HarmonyOS LLM Runtime
+3. 进入“模型中心”
+4. 点击“导入模型”
+5. 选择 .hllm
+6. 等待完整性检查和兼容性检查
+7. 安装
+8. 打开模型
+9. 新建会话
+10. 开始本地对话
+```
+
+开发者：
+
+```text
+1. 在 Ubuntu 部署 Converter
+2. 下载 Hugging Face 模型
+3. inspect 模型
+4. 使用已验证 target profile
+5. 执行 INT4 / ONNX / CANN 转换
+6. validate
+7. 生成 .hllm
+8. 传到 HarmonyOS 真机
+9. 导入
+10. 做设备兼容性与推理 benchmark
+```
+
+## 二十、Compatibility Contract
 
 本项目与 Ubuntu Converter 的唯一核心耦合点是：
 
@@ -474,24 +636,8 @@ harmony-llm-runtime/
 
 Converter 可以持续更换量化、ONNX、CANN 转换实现；Runtime 可以持续更换 UI 和内部运行时实现，只要双方遵守同一模型包规范，就可以独立演进。
 
-## Important Constraint
+## 相关文档
 
-不要为了支持“任意 Hugging Face 模型”而把模型转换逻辑塞入 HarmonyOS App。
-
-正确的边界是：
-
-```text
-Ubuntu:
-任意受支持的模型
-        ↓
-最终可部署 .hllm
-
-HarmonyOS:
-.hllm
-        ↓
-验证
-        ↓
-运行
-```
-
-这样可以保持 HarmonyOS App 体积、依赖和运行环境可控，同时让模型转换链路可以在 Ubuntu 上持续迭代。
+- `../README.md`
+- `../docs/hllm-package-spec.md`
+- `../docs/hllm-manifest.schema.json`
