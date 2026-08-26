@@ -55,21 +55,26 @@ def _section(data: dict[str, Any], name: str) -> dict[str, Any]:
     return value
 
 
+def _validate_schema(data: dict[str, Any], schema_name: str, message: str) -> None:
+    schema_path = Path(__file__).resolve().parents[3] / "docs" / schema_name
+    if not schema_path.is_file():
+        return
+    try:
+        from jsonschema import Draft202012Validator
+    except ImportError as exc:
+        raise RuntimeError("jsonschema is required to load profiles") from exc
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    errors = sorted(Draft202012Validator(schema).iter_errors(data), key=lambda e: list(e.path))
+    if errors:
+        path = ".".join(str(p) for p in errors[0].path) or "$"
+        raise ValueError(f"{message} at {path}: {errors[0].message}")
+
+
 def _validate_build_shape(data: dict[str, Any]) -> None:
     unknown = set(data) - _ALLOWED_BUILD_KEYS
     if unknown:
         raise ValueError(f"unknown build profile keys: {sorted(unknown)}")
-    schema_path = Path(__file__).resolve().parents[3] / "docs" / "build-profile.schema.json"
-    if schema_path.is_file():
-        try:
-            from jsonschema import Draft202012Validator
-            schema = json.loads(schema_path.read_text(encoding="utf-8"))
-            errors = sorted(Draft202012Validator(schema).iter_errors(data), key=lambda e: list(e.path))
-            if errors:
-                path = ".".join(str(p) for p in errors[0].path) or "$"
-                raise ValueError(f"build profile schema error at {path}: {errors[0].message}")
-        except ImportError:
-            raise RuntimeError("jsonschema is required to load build profiles")
+    _validate_schema(data, "build-profile.schema.json", "build profile schema error")
 
 
 def load_profile(path: str | Path) -> BuildProfile:
@@ -77,8 +82,7 @@ def load_profile(path: str | Path) -> BuildProfile:
         import yaml
     except ImportError as exc:
         raise RuntimeError("install PyYAML to use YAML build profiles") from exc
-    profile_path = Path(path).expanduser().resolve()
-    data = yaml.safe_load(profile_path.read_text(encoding="utf-8")) or {}
+    data = yaml.safe_load(Path(path).expanduser().read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
         raise ValueError("build profile root must be a mapping")
     _validate_build_shape(data)
@@ -100,8 +104,7 @@ def load_profile(path: str | Path) -> BuildProfile:
         fallback_path=str(pipeline.get("fallback_path")) if pipeline.get("fallback_path") else None,
         target_chip=target_chip,
         runtime_version=str(cann.get("runtime_version")) if cann.get("runtime_version") else None,
-        quantization=str(quant.get("method", "cann_4bit")),
-        bits=int(quant.get("bits", 4)),
+        quantization=str(quant.get("method", "cann_4bit")), bits=int(quant.get("bits", 4)),
         context_length=int(runtime["context_length"]) if runtime.get("context_length") else None,
         output_dir=Path(output.get("directory", "./dist")).expanduser(),
         quantization_workspace=Path(quant["workspace"]).expanduser() if quant.get("workspace") else None,
@@ -121,10 +124,8 @@ def load_target_profile(path: str | Path) -> TargetProfile:
     data = yaml.safe_load(Path(path).expanduser().read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
         raise ValueError("target profile root must be a mapping")
+    _validate_schema(data, "target-profile.schema.json", "target profile schema error")
     target, cann = _section(data, "target"), _section(data, "cann")
-    missing = [key for key in ("platform", "soc_version", "runtime_model_format") if not str(target.get(key, "")).strip()]
-    if missing:
-        raise ValueError(f"target profile missing keys: {missing}")
     return TargetProfile(
         platform=str(target["platform"]), soc_version=str(target["soc_version"]),
         runtime_model_format=str(target["runtime_model_format"]),
