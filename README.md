@@ -43,11 +43,42 @@ Hugging Face / Local Model
 
 - Qwen3 / Qwen3.5 / Qwen3.8
 - **Qwen/Qwen3.8-27B**
+- **Qwen/Qwen3.8-27B-FP8（官方 FP8 输入源）**
 - 参数规模小于 27B 的受支持模型
 
-Qwen3.8-27B 属于大模型/多模态模型，转换和最终运行都必须以具体 CANN Kit、目标芯片、NPU 内存和 Runtime 版本的实际验证结果为准。
+Qwen 官方已经在 Hugging Face 提供 `Qwen/Qwen3.8-27B-FP8`。该仓库提供 FP8 量化后的 Transformers 格式权重，采用 fine-grained FP8、block size 128，并标注 Apache-2.0。它可以直接被 Transformers、vLLM、SGLang 等框架使用，但它仍然不是 HarmonyOS/CANN 的最终离线模型。citeturn450986view0turn450986view1
 
-> **“27B 及以下”是产品目标范围，不代表任何一台 HarmonyOS 设备都能运行所有这些模型。**
+因此 Converter 现在提供两条入口：
+
+```text
+路径 A：官方 FP8
+Qwen/Qwen3.8-27B-FP8
+        ↓
+Inspect
+        ↓
+FP8 → 已验证 CANN Target Profile
+        ↓
+Validation
+        ↓
+.hllm
+
+路径 B：原始模型
+Qwen/Qwen3.8-27B
+        ↓
+Inspect
+        ↓
+已验证量化/导出流程
+        ↓
+ONNX
+        ↓
+CANN
+        ↓
+Validation
+        ↓
+.hllm
+```
+
+> **FP8 是优先验证的 27B 输入格式，但是否可以直接进入目标 CANN 转换链，必须由具体 CANN Kit 版本与目标芯片 profile 实测确认。**
 
 ## 仓库结构
 
@@ -57,7 +88,8 @@ harmony-llm-platform/
 ├── LICENSE
 ├── docs/
 │   ├── hllm-package-spec.md
-│   └── hllm-manifest.schema.json
+│   ├── hllm-manifest.schema.json
+│   └── qwen3.8-27b-fp8.md
 ├── harmony-llm-converter/
 │   ├── README.md
 │   ├── pyproject.toml
@@ -96,7 +128,7 @@ hllm doctor
 ```text
 Linux
 Python >= 3.10
-GPU/CUDA（用于 CANN LLM 量化）
+GPU/CUDA（用于 CANN LLM 量化；FP8→CANN 也必须按目标 profile 验证）
 PyTorch
 Transformers
 ONNX
@@ -109,33 +141,40 @@ CANN Kit / 工具链
 
 ### 2. 下载模型
 
-例如下载 Qwen3.8-27B：
+#### 官方 FP8 路径（27B 推荐先验证）
+
+```bash
+hllm download Qwen/Qwen3.8-27B-FP8 \
+  --output ./models
+```
+
+检查：
+
+```bash
+hllm inspect ./models/Qwen__Qwen3.8-27B-FP8
+```
+
+#### 原始模型路径
 
 ```bash
 hllm download Qwen/Qwen3.8-27B \
   --output ./models
 ```
 
-下载完成后，先检查模型：
-
-```bash
-hllm inspect ./models/Qwen__Qwen3.8-27B
-```
-
-检查应至少确认：
-
-- model type
-- architecture
-- nested `text_config`
-- tokenizer
-- chat template
-- context length
-- multimodal capability
-- safetensors shard 数量
-
 ### 3. 构建 `.hllm`
 
-使用已经经过真实 CANN/目标设备验证的 target profile：
+使用已经经过真实 CANN/目标设备验证的 target profile。
+
+FP8 输入：
+
+```bash
+hllm build ./models/Qwen__Qwen3.8-27B-FP8 \
+  --target <validated-target-chip> \
+  --profile ./configs/qwen3.8-27b-fp8.example.yaml \
+  --output ./dist
+```
+
+原始模型：
 
 ```bash
 hllm build ./models/Qwen__Qwen3.8-27B \
@@ -145,13 +184,12 @@ hllm build ./models/Qwen__Qwen3.8-27B \
   --output ./dist
 ```
 
-建议先运行 dry-run / planner（如 CLI 版本支持）：
+建议先运行 planner / dry-run（如当前 CLI 版本支持）：
 
 ```bash
-hllm build ./models/Qwen__Qwen3.8-27B \
+hllm build ./models/Qwen__Qwen3.8-27B-FP8 \
   --target <validated-target-chip> \
-  --quant int4 \
-  --profile ./configs/qwen3.8-27b-int4.example.yaml \
+  --profile ./configs/qwen3.8-27b-fp8.example.yaml \
   --output ./dist \
   --dry-run
 ```
@@ -167,9 +205,9 @@ Resource Plan
   ↓
 Model Adapter
   ↓
-CANN 4-bit Quantization
+FP8 conversion / validated quantization path
   ↓
-ONNX Export
+ONNX Export（需要时）
   ↓
 Target-specific CANN Conversion
   ↓
@@ -182,13 +220,13 @@ Validation
 
 ```text
 ./dist/
-└── <model>-<target>-int4.hllm
+└── <model>-<target>-<profile>.hllm
 ```
 
 ### 4. 验证模型包
 
 ```bash
-hllm validate ./dist/<model>-<target>-int4.hllm
+hllm validate ./dist/<model>-<target>-<profile>.hllm
 ```
 
 至少检查：
@@ -199,6 +237,7 @@ artifact presence
 SHA-256
 model metadata
 tokenizer resources
+target profile
 ```
 
 ### 5. 导入 HarmonyOS
@@ -258,6 +297,7 @@ Hugging Face → Converter → .hllm → Runtime
 
 - `docs/hllm-package-spec.md`
 - `docs/hllm-manifest.schema.json`
+- `docs/qwen3.8-27b-fp8.md`
 
 Converter 可以更换量化/导出/CANN 实现，只要生成的 `.hllm` 符合协议，Runtime 就不需要改动。
 
@@ -281,7 +321,7 @@ Operator Support
 Compatibility Result
 ```
 
-因此请不要仅根据“模型只有 4bit”判断某台鸿蒙电脑或平板能够运行。
+因此请不要仅根据“模型只有 4bit”或“模型已经是 FP8”判断某台鸿蒙电脑或平板能够运行。
 
 ## 常见问题
 
@@ -297,9 +337,17 @@ hllm doctor
 
 实际所需工具以对应 CANN Kit profile 为准。
 
+### FP8 模型为什么还需要 Converter？
+
+`Qwen/Qwen3.8-27B-FP8` 是官方 Hugging Face Transformers 格式的 FP8 权重，不是 HarmonyOS/CANN 的最终设备离线模型。必须根据目标芯片执行已验证的 CANN 转换，并最终封装成 `.hllm`。citeturn450986view0
+
+### FP8 能否直接转换成 CANN？
+
+不能在仓库层面假设“所有 CANN 版本、所有目标芯片都支持直接 FP8→设备模型”。必须由 target profile 显式声明并经过真实硬件验证。未验证时应返回 `UNSUPPORTED_TARGET` 或要求采用其他已验证路径。
+
 ### 27B 转换前磁盘不足
 
-27B 原始权重本身就是几十 GB，量化、ONNX 和 CANN 转换还需要额外临时空间。不要只按最终 4bit 理论值准备磁盘。
+27B 原始/FP8 权重都属于大型模型，量化、ONNX 和 CANN 转换还可能需要额外临时空间。不要只按最终模型理论大小准备磁盘。
 
 ### 模型导入 Runtime 后显示不兼容
 
@@ -319,7 +367,7 @@ NPU memory
 
 ### Qwen3.8-27B 能转换但视觉输入不能用
 
-Qwen3.8-27B 是多模态模型。文本路径通过验证不等于视觉/视频路径已经完成验证。当前项目优先锁定文本 LLM 路径，再单独推进多模态能力。
+Qwen3.8-27B 是原生视觉语言模型，官方模型卡同时描述文本、图像和视频能力。当前项目优先锁定文本 LLM 路径，再单独推进多模态 profile；文本路径 PASS 不等于 VLM 完整 PASS。citeturn450986view0
 
 ## 开发与验证
 
@@ -362,6 +410,7 @@ package validation test
 - 外部命令执行边界
 - CANN 4bit 量化阶段建模
 - ONNX/CANN Backend
+- 官方 Qwen3.8-27B-FP8 输入 profile
 - `.hllm` 打包与校验
 - HLLM Manifest Contract
 - HarmonyOS Native Runtime 边界
@@ -371,6 +420,7 @@ package validation test
 
 - 某一具体 Kirin 芯片的最终 CANN 转换 PASS
 - 某一具体 HarmonyOS 电脑/平板上的 NPU 端到端 PASS
+- Qwen3.8-27B FP8→特定 Kirin 目标的生产级直通路径
 - Qwen3.8-27B 视觉/视频路径的生产级支持
 
 ## 贡献原则
@@ -385,3 +435,5 @@ package validation test
 本项目采用 **GNU General Public License v3.0 (GPL-3.0)**。
 
 完整许可证文本见 [`LICENSE`](./LICENSE)。
+
+> 外部模型仓库拥有其自己的许可证。`Qwen/Qwen3.8-27B-FP8` 当前在 Hugging Face 标注为 Apache-2.0；使用该模型时应同时遵守模型仓库的许可与使用要求。citeturn456562search1
