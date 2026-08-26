@@ -18,13 +18,16 @@ class ExecutionContext:
     quant: str
 
     def render(self, value: str) -> str:
-        return Template(value).safe_substitute(
-            model=str(self.model),
-            work=str(self.work),
-            output=str(self.output),
-            target=self.target,
-            quant=self.quant,
-        )
+        replacements = {
+            "model": str(self.model),
+            "work": str(self.work),
+            "output": str(self.output),
+            "target": self.target,
+            "quant": self.quant,
+        }
+        for key, replacement in replacements.items():
+            value = value.replace("{" + key + "}", replacement)
+        return Template(value).safe_substitute(replacements)
 
 
 class StageExecutor:
