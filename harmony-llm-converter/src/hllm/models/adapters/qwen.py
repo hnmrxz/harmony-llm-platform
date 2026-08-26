@@ -1,8 +1,4 @@
-"""Qwen-family model adapter.
-
-The adapter deliberately only identifies the family for now. Export and CANN
-specific behavior will be added after the first hardware-validated pipeline.
-"""
+"""Qwen family adapter, including Qwen3.5/Qwen3.8 metadata layouts."""
 
 from __future__ import annotations
 
@@ -16,3 +12,7 @@ class QwenAdapter:
         model_type = (metadata.model_type or "").lower()
         architecture = (metadata.architecture or "").lower()
         return model_type.startswith("qwen") or architecture.startswith("qwen")
+
+    @staticmethod
+    def is_qwen3_8(metadata: ModelMetadata) -> bool:
+        return (metadata.model_type or "").lower() in {"qwen3_5", "qwen3_8"}
