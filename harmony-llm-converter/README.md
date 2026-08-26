@@ -6,6 +6,38 @@ Ubuntu 端的大语言模型生产工具链。
 
 > **本项目只负责模型生产，不负责 HarmonyOS 端 UI 和最终设备推理。**
 
+## Target Model Range
+
+第一阶段的能力目标不是只支持一个固定模型，而是：
+
+> **Qwen/Qwen3.8-27B 及参数规模更小、且经过 CANN Kit 验证的 Qwen/LLM 模型。**
+
+Qwen3.8-27B 当前 Hugging Face 模型是 27B 参数、原生 262,144 context，并且是带视觉能力的模型；其仓库权重约 55.6 GB。citeturn0search4turn0search5
+
+因此 Converter 必须从第一天就支持 **分片权重**，不能把“单个 safetensors 文件”作为模型假设。
+
+对于 Qwen3.8-27B，首个可交付目标建议定义为：
+
+```text
+Qwen/Qwen3.8-27B
+        ↓
+Hugging Face snapshot
+        ↓
+metadata + shard inventory
+        ↓
+CANN Kit 4-bit quantization
+        ↓
+ONNX export
+        ↓
+CANN target conversion
+        ↓
+validation
+        ↓
+.hllm
+```
+
+> **注意：27B 的最终可运行性不是由“模型大小”单独决定，而是由目标 HarmonyOS 设备的 NPU、内存、CANN Runtime/Kit 版本、算子支持和量化结果共同决定。** HarmonyOS 的 Neural Network Runtime 对 NPU 有硬件依赖，且不支持模拟器。citeturn0search3
+
 ## Core Goal
 
 建立一条稳定、可复现、可扩展的模型生产流水线：
@@ -40,6 +72,7 @@ Package
 
 - Hugging Face 模型下载
 - 本地模型导入
+- 分片权重识别
 - 模型文件校验
 - 模型架构识别
 - 模型家族 Adapter
@@ -63,18 +96,20 @@ Package
 
 ## Recommended Environment
 
-目标环境为 Ubuntu，具体 Python、PyTorch、Transformers、ONNX 和 CANN 版本以实际验证后的兼容矩阵为准。
+目标环境为 Ubuntu。具体 Python、PyTorch、Transformers、ONNX 和 CANN 版本必须通过实际目标设备/Kit 版本建立兼容矩阵后固定。
+
+**重要：当前华为 CANN Kit 的 LLM 4-bit 量化流程要求量化阶段运行在 GPU/CUDA 环境。** 因此“Ubuntu”是操作系统要求，不意味着普通无 GPU 的 Ubuntu 主机就能完成 27B 量化。citeturn0search1
 
 建议项目提供环境检查命令，在执行转换前检查：
 
 ```text
 OS
 Python
-pip / uv / conda
+CUDA / GPU
 PyTorch
 Transformers
 ONNX / ONNX Runtime
-CANN
+CANN Kit
 CANN toolkit / compiler tools
 available disk space
 available memory
@@ -111,21 +146,21 @@ harmony-llm-converter/
 
 ```bash
 hllm doctor
-hllm download Qwen/Qwen3-1.7B
-hllm inspect ./Qwen3-1.7B
-hllm quantize ./Qwen3-1.7B --method int4
-hllm export ./Qwen3-1.7B --format onnx
-hllm convert ./Qwen3-1.7B --target <chip>
+hllm download Qwen/Qwen3.8-27B
+hllm inspect ./Qwen3.8-27B
+hllm quantize ./Qwen3.8-27B --method cann-4bit
+hllm export ./Qwen3.8-27B --format onnx
+hllm convert ./Qwen3.8-27B --target <chip>
 hllm validate ./build/model
 hllm package ./build/model --output ./dist/model.hllm
 ```
 
-同时提供一键流程：
+一键流程目标：
 
 ```bash
-hllm build Qwen/Qwen3-1.7B \
+hllm build Qwen/Qwen3.8-27B \
   --target <chip> \
-  --quant int4 \
+  --quant cann-4bit \
   --output ./dist
 ```
 
@@ -153,11 +188,18 @@ Adapter 应负责处理模型家族差异，例如：
 - config normalization
 - tokenizer
 - chat template
+- multimodal capability
 - ONNX export requirements
 - quantization requirements
 - CANN conversion requirements
 
 转换 Pipeline 不应针对单个模型写大量条件分支。
+
+### Qwen3.8 特别说明
+
+当前 Qwen3.8-27B 的 Hugging Face `config.json` 使用 `qwen3_5` model type，并以 `Qwen3_5ForConditionalGeneration` architecture 描述，同时存在 `text_config`。因此检测器不能只读取顶层 `max_position_embeddings`、`dtype` 等字段。项目已经增加 nested `text_config` 处理和 Qwen3.5/Qwen3.8 识别路径。citeturn0search10
+
+它还是多模态模型，因此 **文本 LLM 路径与视觉/视频路径必须分开验证**；不能因为语言模型部分能转换，就宣称完整 VLM 已经支持。
 
 ## Conversion Pipeline
 
@@ -179,27 +221,47 @@ Adapter 应负责处理模型家族差异，例如：
 
 - architecture
 - model type
+- nested text config
 - parameter count
 - dtype
 - tokenizer
 - chat template
 - context length
+- multimodal capability
+- weight index / shard count
 - required files
 
 ### 3. Quantization
 
-第一阶段重点支持 INT4，并将量化实现抽象为独立 backend。
+首个目标使用 **CANN Kit 的 4-bit LLM 量化流程**，而不是自行发明一套“看起来像 INT4”的算法。
 
-未来可扩展：
+华为当前文档给出的流程为三个阶段：
 
-- INT8
-- BF16/FP16 保持精度
-- 不同 group size
-- calibration dataset
+```text
+Stage 1: Weight Quantization
+        ↓
+Stage 2: Activation Quantization
+        ↓
+Stage 3: Quantization Parameter Extraction
+```
+
+其产物包括 `trained_quant_weight.pth`、`trained.pth`、`fake_quant_weight.pth` 以及量化参数；其中 `fake_quant_weight.pth` 用于 ONNX 导出。citeturn0search0turn0search1
+
+当前官方参数示例还包含：
+
+```text
+ptq_samples: 1024
+cutoff_len: 128
+num_samples: 256
+embedding_separate: true
+quant_param_2: hardware-dependent
+```
+
+其中 `quant_param_2` 与目标硬件有关，因此 Converter **绝不能固定写死**；必须由 target profile 决定。citeturn0search0
 
 ### 4. ONNX Export
 
-将经过适配的模型导出为符合 CANN 转换要求的中间产物。
+将经过适配和量化参数处理的模型导出为符合 CANN 转换要求的中间产物。
 
 导出过程必须保存：
 
@@ -213,7 +275,17 @@ Adapter 应负责处理模型家族差异，例如：
 
 CANN 转换是最终设备模型生产阶段。
 
-所有目标芯片相关配置必须显式记录，不允许使用不可追踪的默认值。
+所有目标芯片相关配置必须显式记录：
+
+```text
+target chip
+runtime version
+compiler/tool version
+operator compatibility
+shape constraints
+```
+
+不要在代码中猜测某个芯片名称或固定 `atc` 参数。CANN backend 使用显式 target profile 和 argv command runner。
 
 ### 6. Validation
 
@@ -231,6 +303,18 @@ Basic inference
 
 如果转换环境具备对应运行条件，应执行最小推理测试。
 
+对于 27B，建议增加：
+
+```text
+FP/BF16 reference output
+↓
+Quantized simulation output
+↓
+Converted model output
+```
+
+进行固定 calibration prompt 的回归比较。
+
 ### 7. Packaging
 
 生成统一 `.hllm` 包。
@@ -247,6 +331,23 @@ model.hllm
 ```
 
 具体 CANN 模型文件扩展名不应成为上层 API 的固定约束，由 `manifest.json` 的 artifact 描述实际文件。
+
+## 27B Storage Planning
+
+Qwen3.8-27B 当前仓库权重约 55.6 GB。理论上纯 4-bit 权重下限约为 13.5 GB（27B × 4 bit），但真实部署包还需要量化 scale/zero-point、embedding、lm_head、runtime metadata、可能的额外权重以及安装临时空间，因此**不能把 13.5 GB 当作实际最终模型大小**。citeturn0search4
+
+Converter 应在开始构建前计算：
+
+```text
+source size
++ temporary quantization workspace
++ ONNX workspace
++ CANN conversion workspace
++ final artifact
++ safety margin
+```
+
+然后拒绝明显不具备足够磁盘空间的构建。
 
 ## HLLM Manifest
 
@@ -282,6 +383,7 @@ build-info.json
 - converter version
 - git commit
 - Python version
+- CUDA version
 - PyTorch version
 - Transformers version
 - ONNX version
@@ -315,47 +417,50 @@ ONNX_EXPORT_FAILED
 CANN_CONVERSION_FAILED
 VALIDATION_FAILED
 PACKAGE_FAILED
+INSUFFICIENT_DISK
+UNSUPPORTED_TARGET
+UNSUPPORTED_OPERATOR
 ```
 
 失败后保留中间产物和日志，方便开发者定位问题；生产模式可以提供自动清理选项。
 
 ## Roadmap
 
-### Phase 1
+### Phase 1 — Qwen3.8-27B / Smaller LLM
 
-- Ubuntu 环境检测
-- Hugging Face 下载
-- Qwen3 Adapter
-- INT4
-- ONNX 导出
-- CANN 转换
-- `.hllm` 第一版
-- 自动验证
+- Ubuntu environment doctor
+- Hugging Face sharded download
+- Qwen3/Qwen3.5/Qwen3.8 metadata adapter
+- CANN 4-bit three-stage quantization integration
+- ONNX export
+- target-specific CANN conversion
+- `.hllm` package
+- automated validation
 
-### Phase 2
+### Phase 2 — Model Ecosystem
 
-- Qwen 系列扩展
+- Qwen family expansion
 - Llama
 - DeepSeek
 - GLM
-- CLI 完善
-- Web UI
+- more CANN-supported architectures
 
-### Phase 3
+### Phase 3 — Conversion Infrastructure
 
-- 批量转换
-- 转换队列
+- batch conversion
+- conversion queue
 - Remote Worker
-- 模型缓存
-- 构建复用
-- Benchmark
+- model cache
+- build reuse
+- benchmark
+- target compatibility database
 
-### Phase 4
+### Phase 4 — Multimodal
 
-- 多芯片目标
-- 更多量化方案
-- 模型注册中心
-- CI 自动构建
+- Qwen3.8 vision path
+- video input path
+- multimodal tokenizer/processor assets
+- HarmonyOS multimodal Runtime contract
 
 ## Important Constraint
 
