@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HLLM Build Profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["model", "cann"],
+  "properties": {
+    "model": {
+      "type": "object",
+      "required": ["source"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {"type": "string", "minLength": 1},
+        "family": {"type": "string"},
+        "input_quantization": {"type": "string", "enum": ["fp8", "bf16", "fp16", "int8", "int4"]}
+      }
+    },
+    "pipeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "preferred_path": {"type": "string"},
+        "fallback_path": {"type": "string"}
+      }
+    },
+    "quantization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "method": {"type": "string"},
+        "bits": {"type": "integer", "minimum": 1, "maximum": 16},
+        "workspace": {"type": "string"},
+        "commands": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}
+      }
+    },
+    "export": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "format": {"type": "string"},
+        "command": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "cann": {
+      "type": "object",
+      "required": ["target_chip"],
+      "additionalProperties": false,
+      "properties": {
+        "target_chip": {"type": "string", "minLength": 1},
+        "runtime_version": {"type": "string"},
+        "workspace": {"type": "string"},
+        "commands": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "context_length": {"type": "integer", "minimum": 1},
+        "capabilities": {"type": "object", "additionalProperties": {"type": "boolean"}}
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "directory": {"type": "string"},
+        "package_extension": {"type": "string", "const": ".hllm"}
+      }
+    }
+  }
+}
