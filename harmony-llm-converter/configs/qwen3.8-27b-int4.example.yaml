@@ -1,0 +1,36 @@
+# Example profile for Qwen/Qwen3.8-27B.
+# This model is a 27B-parameter multimodal model. The current profile targets
+# the language-model deployment path first; vision/video artifacts must be
+# explicitly enabled only after the corresponding CANN operator/runtime path
+# is validated on the target device.
+model:
+  source: Qwen/Qwen3.8-27B
+  revision: main
+  family: qwen
+
+quantization:
+  method: cann_4bit
+  bits: 4
+  # Huawei's current CANN Kit LLM quantization flow uses three phases.
+  stages:
+    - weight
+    - activation
+    - parameter_extraction
+  calibration_samples: 256
+  cutoff_len: 128
+  embedding_separate: true
+  # Set according to the target hardware profile.
+  quant_param_2: false
+
+export:
+  format: onnx
+
+cann:
+  # Deliberately supplied by the target-device profile; do not guess a chip.
+  target_chip: ""
+  runtime_version: ""
+  command_profile: "profiles/<chip>.yaml"
+
+package:
+  output: dist
+  extension: .hllm
