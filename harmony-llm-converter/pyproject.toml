@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harmony-llm-converter"
+version = "0.1.0"
+description = "Ubuntu-side model downloader, analyzer and CANN deployment package builder for HarmonyOS LLM Runtime."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+huggingface = [
+  "huggingface-hub>=0.30",
+  "transformers>=4.50",
+]
+quantization = [
+  "torch>=2.5",
+]
+export = [
+  "onnx>=1.17",
+]
+dev = [
+  "pytest>=8",
+  "ruff>=0.11",
+  "mypy>=1.15",
+]
+
+[project.scripts]
+hllm = "hllm.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+
+target-version = "py310"
