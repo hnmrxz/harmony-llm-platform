@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HLLM Target Profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["target", "cann"],
+  "properties": {
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "soc_version", "runtime_model_format"],
+      "properties": {
+        "platform": {"type": "string", "minLength": 1},
+        "soc_version": {"type": "string", "minLength": 1},
+        "runtime_model_format": {"type": "string", "enum": ["omc", "om", "exeom"]}
+      }
+    },
+    "cann": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {"type": "string"},
+        "conversion_tool": {"type": "string", "enum": ["omg", "atc"]},
+        "framework": {"type": "integer"},
+        "target": {"type": "string"},
+        "platform": {"type": "string"}
+      }
+    }
+  }
+}
