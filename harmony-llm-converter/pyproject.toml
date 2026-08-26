@@ -10,11 +10,13 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "PyYAML>=6.0",
+  "psutil>=6.0",
+  "jsonschema>=4.23",
 ]
 
 [project.optional-dependencies]
 huggingface = [
-  "huggingface-hub>=0.30",
+  "huggingface-hub>=1.0",
   "transformers>=4.50",
 ]
 quantization = [
