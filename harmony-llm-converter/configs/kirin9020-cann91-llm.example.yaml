@@ -1,0 +1,21 @@
+target:
+  platform: kirin9020
+  soc_version: kirin9020
+  runtime_model_format: omc
+
+cann:
+  version: "9.1.0"
+  conversion_tool: omg
+  framework: 5
+  target: omc
+  platform: kirin9020
+
+llm:
+  preferred_source:
+    - Qwen/Qwen3.8-27B-FP8
+    - Qwen/Qwen3.8-27B
+  mode: text-first
+
+# This is a profile skeleton, not a production validation record.
+# Before marking it production-ready, validate the exact CANN Kit/DDK
+# package, target device, supported operators and real HarmonyOS runtime.
