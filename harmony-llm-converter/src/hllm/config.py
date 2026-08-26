@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,17 @@ def _validate_build_shape(data: dict[str, Any]) -> None:
     unknown = set(data) - _ALLOWED_BUILD_KEYS
     if unknown:
         raise ValueError(f"unknown build profile keys: {sorted(unknown)}")
+    schema_path = Path(__file__).resolve().parents[3] / "docs" / "build-profile.schema.json"
+    if schema_path.is_file():
+        try:
+            from jsonschema import Draft202012Validator
+            schema = json.loads(schema_path.read_text(encoding="utf-8"))
+            errors = sorted(Draft202012Validator(schema).iter_errors(data), key=lambda e: list(e.path))
+            if errors:
+                path = ".".join(str(p) for p in errors[0].path) or "$"
+                raise ValueError(f"build profile schema error at {path}: {errors[0].message}")
+        except ImportError:
+            raise RuntimeError("jsonschema is required to load build profiles")
 
 
 def load_profile(path: str | Path) -> BuildProfile:
@@ -65,48 +77,31 @@ def load_profile(path: str | Path) -> BuildProfile:
         import yaml
     except ImportError as exc:
         raise RuntimeError("install PyYAML to use YAML build profiles") from exc
-
     profile_path = Path(path).expanduser().resolve()
     data = yaml.safe_load(profile_path.read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
         raise ValueError("build profile root must be a mapping")
     _validate_build_shape(data)
-
-    model = _section(data, "model")
-    pipeline = _section(data, "pipeline")
-    quant = _section(data, "quantization")
-    runtime = _section(data, "runtime")
-    output = _section(data, "output")
-    cann = _section(data, "cann")
-    export = _section(data, "export")
-
+    model, pipeline = _section(data, "model"), _section(data, "pipeline")
+    quant, runtime = _section(data, "quantization"), _section(data, "runtime")
+    output, cann, export = _section(data, "output"), _section(data, "cann"), _section(data, "export")
     source = str(model.get("source", "")).strip()
-    if not source:
-        raise ValueError("build profile requires model.source")
     target_chip = str(cann.get("target_chip", "")).strip()
-    if not target_chip:
-        raise ValueError("build profile requires cann.target_chip")
-
-    input_quantization = model.get("input_quantization")
-    quant_method = str(quant.get("method", "cann_4bit"))
-    bits = int(quant.get("bits", 4))
-    if input_quantization == "fp8" and bits not in (4, 8):
-        raise ValueError("quantization.bits must be 4 or 8")
-
+    if not source or not target_chip:
+        raise ValueError("build profile requires model.source and cann.target_chip")
     capabilities = runtime.get("capabilities", {})
     if not isinstance(capabilities, dict):
         raise ValueError("runtime.capabilities must be an object")
-
     return BuildProfile(
         model_source=source,
         model_family=str(model.get("family")) if model.get("family") else None,
-        input_quantization=str(input_quantization) if input_quantization else None,
+        input_quantization=str(model.get("input_quantization")) if model.get("input_quantization") else None,
         preferred_path=str(pipeline.get("preferred_path")) if pipeline.get("preferred_path") else None,
         fallback_path=str(pipeline.get("fallback_path")) if pipeline.get("fallback_path") else None,
         target_chip=target_chip,
         runtime_version=str(cann.get("runtime_version")) if cann.get("runtime_version") else None,
-        quantization=quant_method,
-        bits=bits,
+        quantization=str(quant.get("method", "cann_4bit")),
+        bits=int(quant.get("bits", 4)),
         context_length=int(runtime["context_length"]) if runtime.get("context_length") else None,
         output_dir=Path(output.get("directory", "./dist")).expanduser(),
         quantization_workspace=Path(quant["workspace"]).expanduser() if quant.get("workspace") else None,
@@ -123,22 +118,17 @@ def load_target_profile(path: str | Path) -> TargetProfile:
         import yaml
     except ImportError as exc:
         raise RuntimeError("install PyYAML to use YAML target profiles") from exc
-
     data = yaml.safe_load(Path(path).expanduser().read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
         raise ValueError("target profile root must be a mapping")
-    target = _section(data, "target")
-    cann = _section(data, "cann")
-    required = ("platform", "soc_version", "runtime_model_format")
-    missing = [key for key in required if not str(target.get(key, "")).strip()]
+    target, cann = _section(data, "target"), _section(data, "cann")
+    missing = [key for key in ("platform", "soc_version", "runtime_model_format") if not str(target.get(key, "")).strip()]
     if missing:
         raise ValueError(f"target profile missing keys: {missing}")
     return TargetProfile(
-        platform=str(target["platform"]),
-        soc_version=str(target["soc_version"]),
+        platform=str(target["platform"]), soc_version=str(target["soc_version"]),
         runtime_model_format=str(target["runtime_model_format"]),
         cann_version=str(cann.get("version")) if cann.get("version") else None,
-        conversion_tool=str(cann.get("conversion_tool", "omg")),
-        framework=int(cann.get("framework", 5)),
+        conversion_tool=str(cann.get("conversion_tool", "omg")), framework=int(cann.get("framework", 5)),
         target=str(cann.get("target", "omc")),
     )
