@@ -10,9 +10,9 @@ Ubuntu 端的大语言模型生产工具链。
 
 当前首要目标：
 
-> **Qwen/Qwen3.8-27B 及参数规模更小、且经过目标 CANN/设备验证的模型。**
+> **Qwen/Qwen3.8-27B、官方 Qwen/Qwen3.8-27B-FP8，以及参数规模更小、且经过目标 CANN/设备验证的模型。**
 
-Qwen3.8-27B 属于大模型/多模态模型，因此第一阶段要优先跑通文本 LLM 路径；视觉/视频能力必须单独验证，不能因为语言模型部分成功就宣称完整 VLM 已支持。
+Qwen 官方已经提供 `Qwen/Qwen3.8-27B-FP8`。该仓库包含 fine-grained FP8、block size 128 的 FP8 量化权重，格式为 Hugging Face Transformers 模型，并标注 Apache-2.0。它仍然不是 HarmonyOS/CANN 最终离线模型，必须根据 target profile 完成转换与验证。citeturn450986view0turn450986view1
 
 ## 一、Ubuntu 环境准备
 
@@ -64,9 +64,9 @@ Resource Plan
         ↓
 Model Adapter
         ↓
-CANN 4-bit Quantization
+Input-specific conversion path
         ↓
-ONNX Export
+ONNX Export（需要时）
         ↓
 Target-specific CANN Conversion
         ↓
@@ -77,9 +77,56 @@ HLLM Packaging
 .hllm
 ```
 
+对于 Qwen3.8-27B，现在有两个正式输入路径：
+
+```text
+A. 官方 FP8
+Qwen/Qwen3.8-27B-FP8
+        ↓
+Inspect
+        ↓
+FP8 → 已验证 CANN target path
+        ↓
+Validation
+        ↓
+.hllm
+
+B. 原始模型
+Qwen/Qwen3.8-27B
+        ↓
+Inspect
+        ↓
+CANN 量化 / 已验证 intermediate path
+        ↓
+ONNX
+        ↓
+CANN
+        ↓
+.hllm
+```
+
+默认优先验证 FP8 路径；如果目标 CANN Kit/芯片不支持该输入路径，必须明确回退到已经验证的其他路径，而不能假设所有版本都支持 FP8 直转。
+
 ## 三、从 Hugging Face 下载模型
 
-例如：
+### 方案 A：官方 FP8 输入源
+
+```bash
+hllm download Qwen/Qwen3.8-27B-FP8 \
+  --output ./models
+```
+
+建议检查：
+
+```bash
+hllm inspect ./models/Qwen__Qwen3.8-27B-FP8
+```
+
+详细说明见：
+
+- [`docs/qwen3.8-27b-fp8.md`](../docs/qwen3.8-27b-fp8.md)
+
+### 方案 B：原始模型
 
 ```bash
 hllm download Qwen/Qwen3.8-27B \
@@ -98,12 +145,12 @@ hllm download Qwen/Qwen3.8-27B \
 
 ```text
 models/
-└── Qwen__Qwen3.8-27B/
+└── Qwen__Qwen3.8-27B-FP8/
     ├── config.json
     ├── tokenizer.json
     ├── tokenizer_config.json
     ├── model.safetensors.index.json
-    ├── model-00001-of-....safetensors
+    ├── *.safetensors
     └── ...
 ```
 
@@ -112,7 +159,7 @@ models/
 ## 四、模型检测
 
 ```bash
-hllm inspect ./models/Qwen__Qwen3.8-27B
+hllm inspect ./models/Qwen__Qwen3.8-27B-FP8
 ```
 
 检查至少包含：
@@ -120,7 +167,7 @@ hllm inspect ./models/Qwen__Qwen3.8-27B
 - model type
 - architecture
 - nested `text_config`
-- dtype
+- dtype / quantization type
 - context length
 - tokenizer
 - chat template
@@ -128,7 +175,7 @@ hllm inspect ./models/Qwen__Qwen3.8-27B
 - weight index
 - shard count
 
-Qwen3.8 可能通过 `text_config` 描述真正的文本模型配置，因此不能只读取顶层配置。
+Qwen3.8 的有效文本模型配置可能位于 `text_config`，因此不能只读取顶层配置。
 
 ### 权重分片检查
 
@@ -154,7 +201,7 @@ tensor count
 
 ## 五、资源规划
 
-在量化之前必须做资源预估：
+在任何转换之前必须做资源预估：
 
 ```text
 源权重
@@ -165,9 +212,11 @@ tensor count
 + 安全余量
 ```
 
+对于 FP8 输入，同样不能认为转换过程不需要额外显存、内存和磁盘。
+
 27B 模型即使采用 INT4，最终模型也不会等于“参数量 × 4bit”的理论下限，因为还会存在量化参数、scale、部分未量化结构、tokenizer、manifest 和转换临时空间。
 
-推荐先准备远大于最终包体的临时磁盘空间，并在生产环境加入独立的 workspace 分区。
+推荐生产环境使用独立 workspace 分区。
 
 ## 六、Qwen Adapter
 
@@ -193,12 +242,66 @@ Adapter 负责：
 - ONNX 导出输入
 - 量化输入要求
 - CANN 目标要求
+- FP8 输入能力声明
 
 新增模型时不要在主 Pipeline 中增加大量 `if model == ...`。
 
-## 七、CANN 4-bit 量化
+## 七、FP8 输入路径
 
-第一阶段使用华为 CANN Kit 的 LLM 4bit 路径，并把它抽象为三个明确 stage：
+`Qwen/Qwen3.8-27B-FP8` 是官方已经量化为 FP8 的输入模型。它不是最终 HarmonyOS 离线模型：
+
+```text
+HF FP8 weights
+   ≠
+CANN offline model
+   ≠
+.hllm
+```
+
+因此 Converter 应首先检查 target profile 是否声明：
+
+```yaml
+pipeline:
+  preferred_path: fp8_to_cann
+```
+
+如果 profile 已通过真实 CANN/设备验证，则可以执行：
+
+```text
+FP8 source
+   ↓
+target-specific conversion / required intermediate export
+   ↓
+CANN offline model
+   ↓
+Validation
+   ↓
+.hllm
+```
+
+如果 profile 没有声明可靠的 FP8 输入支持，应停止并报告：
+
+```text
+UNSUPPORTED_FP8_TARGET
+```
+
+而不是静默把 FP8 当成 BF16/FP16 处理。
+
+FP8 模型的视觉/视频部分也必须单独声明 capability。第一阶段仍以文本路径为主：
+
+```yaml
+runtime:
+  capabilities:
+    text: true
+    image: false
+    video: false
+```
+
+详见 [`docs/qwen3.8-27b-fp8.md`](../docs/qwen3.8-27b-fp8.md)。
+
+## 八、CANN 4-bit 量化
+
+第一阶段的原始模型路径使用华为 CANN Kit LLM 4bit 路径，并把它抽象为三个明确 stage：
 
 ```text
 Stage 1
@@ -219,24 +322,29 @@ Quantization Parameter Extraction
 - 有版本记录
 - 有产物存在性检查
 
+FP8 输入模型**不应默认再经过同样的 BF16→INT4 三阶段量化**。它需要使用单独的 FP8 target profile；只有实际验证后才能决定是否还需要目标特定的再次量化。
+
 ### Profile 原则
 
 不要在 Python 代码里写死厂商参数。使用 target/build profile：
 
 ```text
 configs/
+├── qwen3.8-27b-fp8.example.yaml
 └── qwen3.8-27b-int4.example.yaml
 ```
 
-生产 profile 至少包含：
+FP8 profile 示例：
 
 ```yaml
 model:
-  source: Qwen/Qwen3.8-27B
+  source: Qwen/Qwen3.8-27B-FP8
+  family: qwen3.8
+  input_quantization: fp8
 
-quantization:
-  method: cann_4bit
-  bits: 4
+pipeline:
+  preferred_path: fp8_to_cann
+  fallback_path: bf16_to_cann_4bit
 
 cann:
   target_chip: <validated-chip>
@@ -246,9 +354,9 @@ cann:
 
 `quant_param_2` 等硬件相关参数必须由 profile 决定，不得全局硬编码。
 
-## 八、ONNX 导出
+## 九、ONNX 导出
 
-量化/模拟量化产物进入 ONNX Export Backend。
+需要 ONNX 的路径进入 ONNX Export Backend。
 
 导出必须记录：
 
@@ -264,14 +372,14 @@ export command
 stdout/stderr
 ```
 
-并将导出目录视为临时 artifact，不直接当作最终 Runtime 输入。
+对于 FP8 路径，如果目标 CANN profile 支持直接的中间模型转换而无需 ONNX，则可以跳过 ONNX，但 Manifest 必须记录实际 backend/path。
 
-## 九、CANN 目标转换
+## 十、CANN 目标转换
 
 CANN Backend 接收一个显式 target profile：
 
 ```text
-Model / ONNX
+Model / ONNX / Intermediate
     ↓
 Target Profile
     ├── chip
@@ -294,7 +402,7 @@ profile
 
 不要把 CANN 命令包装成一个无法诊断的 `conversion failed`。
 
-## 十、验证
+## 十一、验证
 
 至少完成：
 
@@ -321,7 +429,7 @@ Reference model
       ↓
 Calibration prompts
       ↓
-Quantized simulation
+Quantized simulation / source-output baseline
       ↓
 Converted CANN model
       ↓
@@ -330,13 +438,13 @@ Compare outputs
 
 对于 27B，建议保存固定 regression prompt 集合，确保每次 CANN/量化 profile 变化后都能比较结果。
 
-## 十一、生成 `.hllm`
+## 十二、生成 `.hllm`
 
 最终输出：
 
 ```bash
 hllm package ./build/artifacts \
-  --output ./dist/Qwen3.8-27B-<target>-int4.hllm
+  --output ./dist/Qwen3.8-27B-<target>-<profile>.hllm
 ```
 
 `.hllm` 内包含：
@@ -358,9 +466,18 @@ sha256
 type
 ```
 
-## 十二、一键构建
+## 十三、一键构建
 
-目标命令：
+FP8：
+
+```bash
+hllm build ./models/Qwen__Qwen3.8-27B-FP8 \
+  --target <validated-target-chip> \
+  --profile ./configs/qwen3.8-27b-fp8.example.yaml \
+  --output ./dist
+```
+
+原始模型 INT4：
 
 ```bash
 hllm build ./models/Qwen__Qwen3.8-27B \
@@ -376,7 +493,7 @@ hllm build ./models/Qwen__Qwen3.8-27B \
 [download]
 [inspect]
 [plan]
-[quantize]
+[quantize-or-convert]
 [export]
 [cann_convert]
 [validate]
@@ -385,7 +502,7 @@ hllm build ./models/Qwen__Qwen3.8-27B \
 
 每一阶段失败都必须停止后续阶段，避免产生“看起来成功但模型实际不可用”的包。
 
-## 十三、已有转换产物
+## 十四、已有转换产物
 
 如果其他环境已经完成模型转换，可以跳过 Converter 的量化/导出步骤，直接整理已有离线模型、tokenizer 和 metadata，然后按 HLLM Package Contract 生成 `.hllm`。
 
@@ -401,19 +518,25 @@ checksum
 
 这也是项目面对“某些电脑无法完成模型转换”时的备用路线。
 
-## 十四、命令参考
+## 十五、命令参考
 
 ```bash
 # 环境检查
 hllm doctor
 
-# 下载
-hllm download Qwen/Qwen3.8-27B --output ./models
+# 官方 FP8 模型下载
+hllm download Qwen/Qwen3.8-27B-FP8 --output ./models
 
-# 检查模型
-hllm inspect ./models/Qwen__Qwen3.8-27B
+# FP8 模型检查
+hllm inspect ./models/Qwen__Qwen3.8-27B-FP8
 
-# 构建
+# FP8 构建
+hllm build ./models/Qwen__Qwen3.8-27B-FP8 \
+  --target <target> \
+  --profile ./configs/qwen3.8-27b-fp8.example.yaml \
+  --output ./dist
+
+# 原始模型 INT4 构建
 hllm build ./models/Qwen__Qwen3.8-27B \
   --target <target> \
   --quant int4 \
@@ -426,7 +549,7 @@ hllm validate ./dist/model.hllm
 
 CLI 参数和具体 profile 以代码当前版本为准；README 中的 `<target>` 是占位符，不是可直接用于 CANN 的芯片名称。
 
-## 十五、目录与日志
+## 十六、目录与日志
 
 推荐生产目录：
 
@@ -446,7 +569,7 @@ workspace/
 
 失败任务不要马上删除 workspace，否则无法诊断 CANN 失败。
 
-## 十六、故障排查
+## 十七、故障排查
 
 ### 下载失败
 
@@ -469,6 +592,10 @@ model_type
 architectures
 text_config
 ```
+
+### `UNSUPPORTED_FP8_TARGET`
+
+说明当前 target profile 没有声明或没有验证 Qwen3.8-27B-FP8 的输入路径。不要把 FP8 静默转换成其他精度；应切换到经过验证的 profile。
 
 ### `INSUFFICIENT_DISK`
 
@@ -494,7 +621,8 @@ target chip
 command
 stdout
 stderr
-input ONNX metadata
+input format
+input metadata
 shape configuration
 ```
 
@@ -512,7 +640,7 @@ NPU memory
 Runtime version
 ```
 
-## 十七、开发与测试
+## 十八、开发与测试
 
 ```bash
 source .venv/bin/activate
@@ -527,14 +655,16 @@ Model Adapter
 Target Profile
 Quantization Backend
 Export Backend
+FP8 input path
 ```
 
 同时补充对应测试。
 
-## 十八、开发原则
+## 十九、开发原则
 
 - 不把 CANN 私有命令硬编码进通用 Pipeline。
 - 不把模型转换依赖塞进 HarmonyOS Runtime。
 - 不把未验证 target profile 标成 production-ready。
 - 不把“成功生成文件”当成“模型可运行”。
+- FP8 输入不得被静默当作 BF16/FP16 输入。
 - 真实硬件验证结果必须可追溯到 profile、CANN 版本和构建记录。
