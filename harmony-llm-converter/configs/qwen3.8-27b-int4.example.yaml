@@ -1,0 +1,36 @@
+model:
+  source: Qwen/Qwen3.8-27B
+  family: qwen
+
+quantization:
+  method: cann_4bit
+  bits: 4
+  workspace: /opt/cann-llm-quantization
+  # The official CANN Kit LLM quantization flow runs stage1, stage2 and
+  # stage3 through the workspace's run.sh. Review and adapt its generated
+  # dopt_config.json for this model before production conversion.
+  commands:
+    - ["bash", "/opt/cann-llm-quantization/run.sh", "stage1"]
+    - ["bash", "/opt/cann-llm-quantization/run.sh", "stage2"]
+    - ["bash", "/opt/cann-llm-quantization/run.sh", "stage3"]
+
+export:
+  # Replace with the exact ONNX exporter validated for the installed model,
+  # Transformers/PyTorch version, and CANN Kit release.
+  command: ["bash", "/opt/hllm-tools/export_qwen.sh", "{model}", "{work}/onnx"]
+
+cann:
+  target_chip: REPLACE_WITH_VALIDATED_KIRIN_TARGET
+  runtime_version: REPLACE_WITH_VALIDATED_CANN_VERSION
+  workspace: /opt/hllm-cann-conversion
+  # Each command must write the final device-specific offline model into
+  # {work}/final. Keep all vendor-specific flags inside this profile.
+  commands:
+    - ["bash", "/opt/hllm-tools/convert_qwen_cann.sh", "{work}/onnx", "{work}/final", "REPLACE_WITH_VALIDATED_KIRIN_TARGET"]
+
+runtime:
+  context_length: 32768
+
+output:
+  directory: ./build/qwen3.8-27b
+  package_extension: .hllm
