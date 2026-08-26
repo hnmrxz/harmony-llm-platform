@@ -1,0 +1,31 @@
+model:
+  source: Qwen/Qwen3.8-27B-FP8
+  family: qwen3.8
+  input_quantization: fp8
+
+pipeline:
+  preferred_path: fp8_to_cann
+  fallback_path: bf16_to_cann_4bit
+
+export:
+  format: onnx
+
+cann:
+  target_chip: REPLACE_WITH_VALIDATED_TARGET_CHIP
+  runtime_version: REPLACE_WITH_VALIDATED_RUNTIME_VERSION
+  profile: REPLACE_WITH_VALIDATED_CANN_PROFILE
+
+runtime:
+  context_length: 32768
+  capabilities:
+    text: true
+    image: false
+    video: false
+
+output:
+  directory: ./dist
+  package_extension: .hllm
+
+# This is a hardware-validation template. Do not mark it production-ready
+# until the selected CANN Kit release and target HarmonyOS device have been
+# tested end-to-end.
