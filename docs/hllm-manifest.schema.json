@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hnmrxz/harmony-llm-platform/blob/main/docs/hllm-manifest.schema.json",
+  "title": "HarmonyOS LLM Package Manifest",
+  "type": "object",
+  "required": ["schema_version", "model", "quantization", "target", "runtime", "build", "artifacts"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "model": {
+      "type": "object",
+      "required": ["name", "family", "architecture"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "family": {"type": "string", "minLength": 1},
+        "architecture": {"type": "string", "minLength": 1},
+        "source_type": {"type": "string"},
+        "source_id": {"type": ["string", "null"]},
+        "revision": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "quantization": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {"type": "string"},
+        "bits": {"type": ["integer", "null"]},
+        "group_size": {"type": ["integer", "null"]}
+      }
+    },
+    "target": {
+      "type": "object",
+      "required": ["backend", "chip"],
+      "properties": {
+        "backend": {"type": "string"},
+        "chip": {"type": "string"},
+        "runtime_version": {"type": ["string", "null"]}
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "properties": {
+        "context_length": {"type": ["integer", "null"]},
+        "minimum_memory_mb": {"type": ["integer", "null"]}
+      }
+    },
+    "build": {"type": "object"},
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "path"],
+        "properties": {
+          "type": {"type": "string"},
+          "path": {"type": "string"},
+          "sha256": {"type": ["string", "null"]},
+          "size": {"type": ["integer", "null"]}
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}
