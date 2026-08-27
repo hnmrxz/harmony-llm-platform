@@ -2,7 +2,7 @@ from pathlib import Path
 
 import onnx
 
-from hllm.backends.onnx import audit_onnx
+from hllm.backends.onnx import audit_onnx, normalize_onnx_node_names
 
 
 def _minimal_model(path: Path, opset: int = 11) -> None:
@@ -90,3 +90,33 @@ def test_audit_rejects_missing_external_data(tmp_path: Path) -> None:
     report = audit_onnx(path)
     assert not report["ok"]
     assert any("ONNX_EXTERNAL_DATA_MISSING" in error for error in report["errors"])
+
+
+def test_normalize_onnx_node_names_makes_names_short_unique(tmp_path: Path) -> None:
+    from onnx import TensorProto, helper
+
+    path = tmp_path / "model.onnx"
+    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])
+    z = helper.make_tensor_value_info("z", TensorProto.FLOAT, [1])
+    nodes = [
+        helper.make_node("Identity", ["x"], ["y"], name="/wrapped/model/Identity_0"),
+        helper.make_node("Identity", ["y"], ["z"], name="/wrapped/model/Identity_0"),
+        helper.make_node("Identity", ["z"], ["out"], name=""),
+    ]
+    out = helper.make_tensor_value_info("out", TensorProto.FLOAT, [1])
+    model = helper.make_model(
+        helper.make_graph(nodes, "g", [x], [out]),
+        opset_imports=[helper.make_operatorsetid("", 11)],
+    )
+    onnx.save(model, path)
+
+    result = normalize_onnx_node_names(path)
+    assert result["changed"] == 3
+
+    normalized = onnx.load(path, load_external_data=False)
+    names = [node.name for node in normalized.graph.node]
+    assert names == ["n000000_Identity", "n000001_Identity", "n000002_Identity"]
+    assert len(names) == len(set(names))
+    assert [list(node.input) for node in normalized.graph.node] == [["x"], ["y"], ["z"]]
+    assert [list(node.output) for node in normalized.graph.node] == [["y"], ["z"], ["out"]]
