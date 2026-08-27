@@ -1,50 +1,46 @@
-"""ONNX export helpers for decoder-only Qwen models.
-
-The exporter uses a conservative legacy Torch ONNX path because the converter
-supports Python environments whose PyTorch versions predate the newer exporter.
-Qwen is forced onto an eager-attention, FP32, no-cache graph to avoid complex
-intermediate values that the legacy exporter cannot lower reliably.
-"""
+"""Qwen ONNX exporters and CANN-oriented ONNX validation helpers."""
 from __future__ import annotations
 
+import json
+from collections import Counter
 from pathlib import Path
+from typing import Any
 
 
-def export_qwen_onnx(model_dir: Path, output: Path, *, opset: int = 17) -> Path:
-    """Export a local Qwen causal-LM to a deployable ONNX graph."""
+def _export_with_torch(
+    model_dir: Path,
+    output: Path,
+    *,
+    opset: int,
+    batch_size: int,
+    sequence_length: int,
+    precision: str,
+) -> Path:
     try:
         import torch
         from transformers import AutoModelForCausalLM
     except ImportError as exc:
         raise RuntimeError("PyTorch and Transformers are required for ONNX export") from exc
 
-    model_dir = model_dir.expanduser().resolve()
-    output = output.expanduser().resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
-
-    load_kwargs = {
-        "torch_dtype": torch.float32,
+    dtype = torch.float32 if precision == "fp32" else "auto"
+    kwargs: dict[str, Any] = {
+        "dtype": dtype,
         "low_cpu_mem_usage": True,
     }
     try:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_dir,
-            attn_implementation="eager",
-            **load_kwargs,
-        )
+        kwargs["attn_implementation"] = "eager"
+        model = AutoModelForCausalLM.from_pretrained(model_dir, **kwargs)
     except TypeError:
-        # Compatibility with Transformers releases that do not expose
-        # attn_implementation on from_pretrained.
-        model = AutoModelForCausalLM.from_pretrained(model_dir, **load_kwargs)
-        if hasattr(model.config, "_attn_implementation"):
-            model.config._attn_implementation = "eager"
-    model = model.float()
+        kwargs.pop("attn_implementation", None)
+        model = AutoModelForCausalLM.from_pretrained(model_dir, **kwargs)
     model.eval()
+    if precision == "fp32":
+        model = model.float()
 
     device = next(model.parameters()).device
-    input_ids = torch.ones((1, 4), dtype=torch.long, device=device)
+    input_ids = torch.ones((batch_size, sequence_length), dtype=torch.long, device=device)
     attention_mask = torch.ones_like(input_ids)
-    position_ids = torch.arange(4, device=device, dtype=torch.long).unsqueeze(0)
+    position_ids = torch.arange(sequence_length, device=device, dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
 
     class LogitsWrapper(torch.nn.Module):
         def __init__(self, wrapped: torch.nn.Module) -> None:
@@ -57,40 +53,158 @@ def export_qwen_onnx(model_dir: Path, output: Path, *, opset: int = 17) -> Path:
             attention_mask: torch.Tensor,
             position_ids: torch.Tensor,
         ) -> torch.Tensor:
-            return self.wrapped(
+            out = self.wrapped(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 use_cache=False,
                 return_dict=False,
-            )[0]
+            )
+            return out[0]
 
     wrapper = LogitsWrapper(model)
-    try:
-        with torch.no_grad():
-            torch.onnx.export(
-                wrapper,
-                (input_ids, attention_mask, position_ids),
-                str(output),
-                input_names=["input_ids", "attention_mask", "position_ids"],
-                output_names=["logits"],
-                dynamic_axes={
-                    "input_ids": {0: "batch", 1: "sequence"},
-                    "attention_mask": {0: "batch", 1: "sequence"},
-                    "position_ids": {0: "batch", 1: "sequence"},
-                    "logits": {0: "batch", 1: "sequence"},
-                },
-                opset_version=opset,
-                dynamo=False,
-            )
-    except RuntimeError as exc:
-        message = str(exc)
-        if "ComplexDouble" in message or "complex" in message.lower():
-            raise RuntimeError(
-                "ONNX_EXPORT_UNSUPPORTED: legacy Torch ONNX exporter encountered "
-                "a complex tensor in the Qwen graph even with eager/FP32/no-cache "
-                "export. Upgrade the export backend or use a validated pre-converted "
-                "ONNX model for this Transformers/PyTorch combination."
-            ) from exc
-        raise
+    with torch.no_grad():
+        torch.onnx.export(
+            wrapper,
+            (input_ids, attention_mask, position_ids),
+            str(output),
+            input_names=["input_ids", "attention_mask", "position_ids"],
+            output_names=["logits"],
+            opset_version=opset,
+            do_constant_folding=True,
+            dynamo=False,
+        )
     return output
+
+
+def _consolidate_external_data(path: Path, *, external_data: bool) -> None:
+    import onnx
+    from onnx.external_data_helper import convert_model_to_external_data
+
+    model = onnx.load(str(path), load_external_data=False)
+    if external_data:
+        data_name = f"{path.name}.data"
+        convert_model_to_external_data(
+            model,
+            all_tensors_to_one_file=True,
+            location=data_name,
+            size_threshold=0,
+        )
+    onnx.save_model(
+        model,
+        str(path),
+        save_as_external_data=external_data,
+        all_tensors_to_one_file=external_data,
+        location=f"{path.name}.data" if external_data else None,
+    )
+
+
+def export_qwen_onnx(
+    model_dir: Path,
+    output: Path,
+    *,
+    mode: str = "generic",
+    opset: int = 17,
+    ir_version: int | None = None,
+    batch_size: int = 1,
+    sequence_length: int = 4,
+    precision: str = "auto",
+    external_data: bool = True,
+) -> Path:
+    """Export Qwen and normalize it for the selected downstream backend.
+
+    ``generic`` preserves a dynamic diagnostic graph. ``cann_static`` emits a
+    fixed batch/sequence graph, eager attention, explicit position_ids, a
+    target opset, and consolidated ONNX external data suitable for vendor tools.
+    """
+    model_dir = model_dir.expanduser().resolve()
+    output = output.expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if mode not in {"generic", "cann_static"}:
+        raise ValueError(f"unsupported ONNX export mode: {mode}")
+    if batch_size < 1 or sequence_length < 1:
+        raise ValueError("batch_size and sequence_length must be positive")
+    if precision not in {"auto", "fp32"}:
+        raise ValueError(f"unsupported export precision: {precision}")
+
+    _export_with_torch(
+        model_dir,
+        output,
+        opset=opset,
+        batch_size=batch_size,
+        sequence_length=sequence_length,
+        precision=precision,
+    )
+
+    if mode == "cann_static":
+        import onnx
+
+        model = onnx.load(str(output), load_external_data=False)
+        if ir_version is not None:
+            model.ir_version = ir_version
+        model.opset_import[0].version = opset
+        onnx.save(model, str(output))
+    _consolidate_external_data(output, external_data=external_data)
+    return output
+
+
+def audit_onnx(path: str | Path, *, expected_opset: int | None = None, expected_ir: int | None = None,
+               require_static: bool = False) -> dict[str, Any]:
+    """Audit ONNX metadata without loading external tensor payloads."""
+    import onnx
+
+    model_path = Path(path).expanduser().resolve()
+    model = onnx.load(str(model_path), load_external_data=False)
+    onnx.checker.check_model(model, full_check=False)
+
+    dynamic_inputs: list[str] = []
+    for value in model.graph.input:
+        if value.type.HasField("tensor_type") and value.type.tensor_type.HasField("shape"):
+            if any(dim.dim_param or dim.dim_value == 0 for dim in value.type.tensor_type.shape.dim):
+                dynamic_inputs.append(value.name)
+
+    opset = next((item.version for item in model.opset_import if item.domain == ""), None)
+    node_counts = Counter(node.op_type for node in model.graph.node)
+    external = sum(bool(initializer.external_data) for initializer in model.graph.initializer)
+    external_locations: list[str] = []
+    for initializer in model.graph.initializer:
+        for entry in initializer.external_data:
+            if entry.key == "location":
+                external_locations.append(entry.value)
+                break
+
+    errors: list[str] = []
+    if expected_opset is not None and opset != expected_opset:
+        errors.append(f"opset={opset}, expected={expected_opset}")
+    if expected_ir is not None and model.ir_version != expected_ir:
+        errors.append(f"ir_version={model.ir_version}, expected={expected_ir}")
+    if require_static and dynamic_inputs:
+        errors.append(f"dynamic_inputs={dynamic_inputs}")
+    missing_external = [
+        location for location in sorted(set(external_locations))
+        if not (model_path.parent / location).is_file()
+    ]
+    if missing_external:
+        errors.append(f"missing_external_data={missing_external}")
+
+    return {
+        "path": str(model_path),
+        "ir_version": model.ir_version,
+        "opset": opset,
+        "nodes": len(model.graph.node),
+        "initializers": len(model.graph.initializer),
+        "external_initializers": external,
+        "dynamic_inputs": dynamic_inputs,
+        "inputs": [value.name for value in model.graph.input],
+        "outputs": [value.name for value in model.graph.output],
+        "op_types": dict(node_counts),
+        "external_locations": sorted(set(external_locations)),
+        "ok": not errors,
+        "errors": errors,
+    }
+
+
+def write_audit(path: str | Path, audit: dict[str, Any]) -> Path:
+    destination = Path(path).expanduser().resolve()
+    destination.write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
+    return destination
