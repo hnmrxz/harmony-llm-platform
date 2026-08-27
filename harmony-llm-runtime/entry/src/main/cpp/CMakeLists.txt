@@ -48,6 +48,7 @@ set(HLLM_NATIVE_SRC
     ${HLLM_NATIVE_ROOT}/model_package/PackageReader.cpp
     ${HLLM_NATIVE_ROOT}/model_package/ZipReader.cpp
     ${HLLM_NATIVE_ROOT}/model_package/Inflate.cpp
+    ${HLLM_NATIVE_ROOT}/runtime/ModelManager.cpp
 )
 
 add_library(entry SHARED LLMEngineModule.cpp ${HLLM_NATIVE_SRC})

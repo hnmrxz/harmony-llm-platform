@@ -9,6 +9,7 @@
 #include "model_package/ZipReader.h"
 #include "model_package/PackageReader.h"
 #include "model_package/Manifest.h"
+#include "runtime/ModelManager.h"
 
 using namespace hllm;
 
@@ -65,6 +66,34 @@ int main(int argc, char** argv) {
     check(!engineFiles.contextJsonPath.empty(), "context.json located");
     check(!engineFiles.executorJsonPath.empty(), "executor.json located");
     check(!engineFiles.tokenizerJsonPath.empty(), "tokenizer.json located");
+
+    // 4. ModelManager: import into a durable store and drive the state machine.
+    const std::string store = package + ".store";
+    ModelManager manager(store);
+    std::string modelId;
+    errors.clear();
+    bool imported = manager.ImportPackage(package, modelId, errors);
+    check(imported, "modelmanager import + install");
+    for (const auto& e : errors) {
+        std::printf("    err: %s\n", e.c_str());
+    }
+    check(!modelId.empty(), "stable model id assigned");
+
+    InstalledModel model;
+    check(manager.GetModel(modelId, model), "retrieve installed model");
+    check(model.state == ModelState::Installed, "state == INSTALLED after import");
+    check(model.name == "Qwen3-8B", "installed model name");
+
+    // Advance the lifecycle state and confirm persistence.
+    check(manager.SetState(modelId, ModelState::Ready), "set state READY");
+    ModelManager reloaded(store);
+    InstalledModel after;
+    check(reloaded.GetModel(modelId, after) && after.state == ModelState::Ready,
+          "state persisted across store reload");
+
+    EngineFiles loadedFiles;
+    check(reloaded.GetEngineFiles(modelId, loadedFiles) && !loadedFiles.omcPath.empty(),
+          "loaded engine files from store");
 
     if (failures == 0) {
         std::printf("ALL PASS\n");

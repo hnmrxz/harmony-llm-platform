@@ -49,15 +49,22 @@ LLM Engine 已经封装好完整的大模型计算链路：
 ```text
 harmony-llm-runtime/
 ├── README.md
-├── AppScope/
-│   └── app.json5
 ├── build-profile.json5
 ├── hvigorfile.ts
 ├── oh-package.json5
+├── code-linter.json5
+├── hvigor/
+│   └── hvigor-config.json5
+├── AppScope/
+│   ├── app.json5
+│   └── resources/base/
+│       ├── element/string.json
+│       └── media/layered_image.json
 ├── entry/
 │   ├── build-profile.json5
 │   ├── hvigorfile.ts
 │   ├── oh-package.json5
+│   ├── obfuscation-rules.txt
 │   └── src/main/
 │       ├── module.json5
 │       ├── cpp/
@@ -68,35 +75,33 @@ harmony-llm-runtime/
 │       │       └── oh-package.json5
 │       ├── ets/
 │       │   ├── entryability/EntryAbility.ets
+│       │   ├── entrybackupability/EntryBackupAbility.ets
 │       │   └── pages/Index.ets             # Chat UI + 模型加载
-│       └── resources/base/
-│           ├── element/string.json
-│           ├── element/color.json
-│           └── profile/main_pages.json
-└── native/
-    ├── runtime/
-    │   ├── InferenceBackend.h              # 抽象推理接口（LLM Engine 生命周期）
-    │   └── LLMEngineApi.h                  # LLM Engine C-API 契约
-    ├── backends/cann/
-    │   └── CannBackend.cpp                 # LLM Engine 实现
-    ├── test/
-    │   ├── make_test_hllm.py               # 生成一个 deflate 压缩的 .hllm 测试包
-    │   ├── host_import_test.cpp            # 主机侧导入流程测试（无需 OHOS/NAPI）
-    │   └── run_host_test.sh
-    └── native/
-        ├── runtime/
-        │   ├── InferenceBackend.h          # 抽象推理接口（LLM Engine 生命周期）
-        │   └── LLMEngineApi.h              # LLM Engine C-API 契约
-        ├── backends/cann/
-        │   └── CannBackend.cpp             # LLM Engine 实现
-        └── model_package/
-            ├── Manifest.h
-            ├── EngineConfig.h              # context.json / executor.json 类型
-            ├── ZipReader.h / .cpp          # .hllm（ZIP）解包（stored + deflate）
-            ├── Inflate.h / .cpp            # 自包含 DEFLATE 解压（无需 zlib）
-            ├── PackageReader.h / .cpp      # .hllm 校验 / 定位引擎文件
-            ├── Json.h / .cpp               # 轻量 JSON 解析
-            └── Sha256.h / .cpp             # 完整性校验用 SHA-256
+│       └── resources/
+│           ├── base/element/{string,color,float}.json
+│           ├── base/media/layered_image.json
+│           ├── base/profile/{main_pages,backup_config}.json
+│           └── dark/element/color.json
+├── native/
+│   ├── runtime/
+│   │   ├── InferenceBackend.h              # 抽象推理接口（LLM Engine 生命周期）
+│   │   ├── LLMEngineApi.h                  # LLM Engine C-API 契约
+│   │   ├── ModelState.h                    # 模型生命周期状态
+│   │   └── ModelManager.h / .cpp           # 模型仓库（导入/原子安装/状态机/持久化）
+│   ├── backends/cann/
+│   │   └── CannBackend.cpp                 # LLM Engine 实现
+│   └── model_package/
+│       ├── Manifest.h
+│       ├── EngineConfig.h                  # context.json / executor.json 类型
+│       ├── ZipReader.h / .cpp              # .hllm（ZIP）解包（stored + deflate）
+│       ├── Inflate.h / .cpp                # 自包含 DEFLATE 解压（无需 zlib）
+│       ├── PackageReader.h / .cpp          # .hllm 校验 / 定位引擎文件
+│       ├── Json.h / .cpp                   # 轻量 JSON 解析 + 序列化
+│       └── Sha256.h / .cpp                 # 完整性校验用 SHA-256
+└── test/
+    ├── make_test_hllm.py                   # 生成一个 deflate 压缩的 .hllm 测试包
+    ├── host_import_test.cpp                # 主机侧导入/模型仓库测试（无需 OHOS/NAPI）
+    └── run_host_test.sh
 ```
 
 ## 三、模型包（.hllm）
@@ -185,7 +190,23 @@ cd harmony-llm-runtime
 bash test/run_host_test.sh
 ```
 
-该测试用 Python 生成一个 deflate 压缩的 `.hllm`，用 ZipReader 解包、PackageReader 校验并定位引擎文件，全部通过即证明导入链路正确。
+该测试用 Python 生成一个 deflate 压缩的 `.hllm`，用 ZipReader 解包、PackageReader 校验并定位引擎文件，再用 ModelManager 导入到持久化模型仓库并驱动状态机，全部通过即证明导入链路正确。
+
+### `native/runtime/ModelManager.h/.cpp`
+
+模型仓库（durable model store），封装导入生命周期：
+
+```text
+ImportPackage(.hllm)
+  ├─ ZipReader 解包到 staging
+  ├─ PackageReader 校验 manifest + SHA-256
+  ├─ 原子安装（staging → installed/<id>，旧版本先移开后替换）
+  ├─ 写入 models.json 索引
+  └─ 状态 = INSTALLED
+SetState / GetModel / GetEngineFiles / List
+```
+
+状态：`IMPORTED → VALIDATING → INSTALLED → READY → RUNNING → READY`，异常 `ERROR / INCOMPATIBLE`。索引持久化为 `models.json`，跨重启保留，加载后 `GetEngineFiles` 从安装目录重新解析引擎文件路径。
 
 ## 五、NAPI 桥（entry/src/main/cpp/LLMEngineModule.cpp）
 

@@ -121,5 +121,8 @@ private:
  */
 std::unique_ptr<Value> Parse(const std::string& text);
 
+/* Serialize a value to compact JSON (used for model index persistence). */
+std::string Serialize(const Value& value);
+
 }  // namespace json
 }  // namespace hllm

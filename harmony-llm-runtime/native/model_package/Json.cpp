@@ -1,5 +1,6 @@
 #include "Json.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -251,6 +252,85 @@ private:
 std::unique_ptr<Value> Parse(const std::string& text) {
     Parser parser(text);
     return parser.ParseDocument();
+}
+
+namespace {
+
+void AppendString(std::string& out, const std::string& s) {
+    out.push_back('"');
+    for (char c : s) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(c));
+                    out += buf;
+                } else {
+                    out.push_back(c);
+                }
+        }
+    }
+    out.push_back('"');
+}
+
+void Append(std::string& out, const Value& v) {
+    switch (v.type()) {
+        case Type::Null: out += "null"; break;
+        case Type::Bool: out += v.as_bool() ? "true" : "false"; break;
+        case Type::Number: {
+            double n = v.as_number();
+            char buf[32];
+            if (n == static_cast<int64_t>(n)) {
+                std::snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(n));
+            } else {
+                std::snprintf(buf, sizeof(buf), "%g", n);
+            }
+            out += buf;
+            break;
+        }
+        case Type::String: AppendString(out, v.as_string()); break;
+        case Type::Object: {
+            out.push_back('{');
+            bool first = true;
+            for (const auto& kv : v.members()) {
+                if (!first) {
+                    out.push_back(',');
+                }
+                first = false;
+                AppendString(out, kv.first);
+                out.push_back(':');
+                Append(out, *kv.second);
+            }
+            out.push_back('}');
+            break;
+        }
+        case Type::Array: {
+            out.push_back('[');
+            bool first = true;
+            for (const auto& item : v.items()) {
+                if (!first) {
+                    out.push_back(',');
+                }
+                first = false;
+                Append(out, *item);
+            }
+            out.push_back(']');
+            break;
+        }
+    }
+}
+
+}  // namespace
+
+std::string Serialize(const Value& value) {
+    std::string out;
+    Append(out, value);
+    return out;
 }
 
 }  // namespace json

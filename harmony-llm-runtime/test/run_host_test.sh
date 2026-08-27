@@ -18,10 +18,11 @@ echo "== build host import test =="
   "$SRC_DIR/model_package/Json.cpp" \
   "$SRC_DIR/model_package/Sha256.cpp" \
   "$SRC_DIR/model_package/PackageReader.cpp" \
+  "$SRC_DIR/runtime/ModelManager.cpp" \
   -o /tmp/host_import_test
 
 echo "== run =="
 /tmp/host_import_test test/test_model.hllm
 
-rm -rf test/test_model.hllm.d
+rm -rf test/test_model.hllm test/test_model.hllm.d test/test_model.hllm.store
 echo "OK"
