@@ -35,6 +35,40 @@ def test_audit_rejects_wrong_opset(tmp_path: Path) -> None:
     assert any("opset=17" in error for error in report["errors"])
 
 
+def test_audit_external_data_by_model_path(tmp_path: Path) -> None:
+    from onnx import TensorProto, helper
+
+    path = tmp_path / "model.onnx"
+    data_path = tmp_path / "weights.bin"
+    data_path.write_bytes((1.0).hex().encode())
+
+    tensor = helper.make_tensor("w", TensorProto.FLOAT, [1], [1.0])
+    tensor.ClearField("raw_data")
+    tensor.data_location = TensorProto.EXTERNAL
+    entry = tensor.external_data.add()
+    entry.key = "location"
+    entry.value = data_path.name
+    entry = tensor.external_data.add()
+    entry.key = "length"
+    entry.value = "4"
+    entry = tensor.external_data.add()
+    entry.key = "offset"
+    entry.value = "0"
+    node = helper.make_node("Identity", ["w"], ["y"], name="identity")
+    y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])
+    model = helper.make_model(
+        helper.make_graph([node], "g", [], [y], initializer=[tensor]),
+        opset_imports=[helper.make_operatorsetid("", 11)],
+    )
+    onnx.save(model, path)
+
+    # The audit/checker must validate external data relative to the ONNX file,
+    # not against an unloaded ModelProto passed directly to check_model().
+    report = audit_onnx(path)
+    assert report["ok"]
+    assert report["external_locations"] == [data_path.name]
+
+
 def test_audit_rejects_missing_external_data(tmp_path: Path) -> None:
     from onnx import TensorProto, helper
 
@@ -46,15 +80,13 @@ def test_audit_rejects_missing_external_data(tmp_path: Path) -> None:
     entry.key = "location"
     entry.value = "missing.bin"
     node = helper.make_node("Identity", ["w"], ["y"], name="identity")
-    x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])
     y = helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])
     model = helper.make_model(
         helper.make_graph([node], "g", [], [y], initializer=[tensor]),
         opset_imports=[helper.make_operatorsetid("", 11)],
     )
-    model.graph.node[0].input[0] = "w"
     onnx.save(model, path)
 
     report = audit_onnx(path)
     assert not report["ok"]
-    assert any("missing_external_data" in error for error in report["errors"])
+    assert any("ONNX_EXTERNAL_DATA_MISSING" in error for error in report["errors"])
