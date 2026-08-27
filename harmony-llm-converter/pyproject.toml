@@ -25,6 +25,7 @@ quantization = [
 ]
 export = [
   "onnx>=1.17",
+  "onnxsim>=0.4.36",
 ]
 dev = [
   "pytest>=8",
