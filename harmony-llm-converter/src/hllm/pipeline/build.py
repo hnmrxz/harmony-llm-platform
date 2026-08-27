@@ -9,7 +9,7 @@ from pathlib import Path
 
 from hllm.backends.commands import ExternalCommandError
 from hllm.backends.omg import build_omg_command
-from hllm.backends.onnx import audit_onnx, export_qwen_onnx, write_audit
+from hllm.backends.onnx import audit_onnx, export_qwen_onnx, normalize_onnx_node_names, write_audit
 from hllm.config import BuildProfile, load_profile
 from hllm.download.huggingface import download_model
 from hllm.models.adapters import default_registry
@@ -237,6 +237,12 @@ def build(request: BuildRequest) -> dict:
         if profile.export_command:
             executor.run((profile.export_command,))
         onnx_path = _export_onnx_if_needed(source, runner.work_dir, profile, match.family, runner.state.record)
+
+        # Kirin X90's legacy OMG parser has a fragile user-node-name mapping pass.
+        # Node names are non-semantic metadata, so normalize them immediately before
+        # OMG. This also covers ONNX files reused from a previous build/export.
+        node_name_audit = normalize_onnx_node_names(onnx_path)
+        runner.state.record(f"onnx_node_names_normalized={node_name_audit['changed']}")
 
         onnx_audit = audit_onnx(
             onnx_path,
