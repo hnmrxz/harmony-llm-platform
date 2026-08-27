@@ -1,0 +1,5 @@
+# NVIDIA CUDA 12.6 PyTorch environment for Ubuntu/WSL2.
+# Install this file with the official PyTorch CUDA 12.6 index:
+# python3 -m pip install -r requirements/cuda126.txt --index-url https://download.pytorch.org/whl/cu126
+# The host NVIDIA driver must be compatible with CUDA 12.x.
+torch==2.13.0
