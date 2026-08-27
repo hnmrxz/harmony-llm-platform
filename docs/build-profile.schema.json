@@ -38,7 +38,7 @@
       "additionalProperties": false,
       "properties": {
         "format": {"type": "string", "enum": ["onnx"]},
-        "mode": {"type": "string", "enum": ["generic", "cann_static"]},
+        "mode": {"type": "string", "enum": ["generic", "cann_static", "official_npu_tuned"]},
         "precision": {"type": "string", "enum": ["auto", "fp32"]},
         "opset": {"type": "integer", "minimum": 9, "maximum": 20},
         "ir_version": {"type": "integer", "minimum": 3, "maximum": 12},

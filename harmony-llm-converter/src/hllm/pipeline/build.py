@@ -87,6 +87,16 @@ def _export_onnx_if_needed(source: Path, work_dir: Path, profile: BuildProfile, 
     export_dir = work_dir / "export"
     output = export_dir / "model.onnx"
     existing = sorted(export_dir.glob("*.onnx"))
+    if profile.export_mode == "official_npu_tuned":
+        # Official path: the NPU-tuned export (via profile.export_command)
+        # produces the friendly ONNX; we do not synthesize it here.
+        if existing:
+            logger(f"onnx_source=npu_tuned path={existing[0]}")
+            return existing[0]
+        raise RuntimeError(
+            "official_npu_tuned requires the NPU-tuned ONNX produced by "
+            "export.command (npu_tuned_export); none found under work/export"
+        )
     if profile.export_mode == "cann_static":
         if existing:
             report = audit_onnx(existing[0], expected_opset=profile.export_opset,
