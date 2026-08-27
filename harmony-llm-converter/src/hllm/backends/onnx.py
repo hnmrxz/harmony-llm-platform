@@ -22,13 +22,12 @@ def _export_with_torch(
     except ImportError as exc:
         raise RuntimeError("PyTorch and Transformers are required for ONNX export") from exc
 
-    dtype = torch.float32 if precision == "fp32" else "auto"
     kwargs: dict[str, Any] = {
-        "dtype": dtype,
+        "dtype": torch.float32 if precision == "fp32" else "auto",
         "low_cpu_mem_usage": True,
+        "attn_implementation": "eager",
     }
     try:
-        kwargs["attn_implementation"] = "eager"
         model = AutoModelForCausalLM.from_pretrained(model_dir, **kwargs)
     except TypeError:
         kwargs.pop("attn_implementation", None)
@@ -77,26 +76,43 @@ def _export_with_torch(
     return output
 
 
+def _simplify_static(path: Path) -> None:
+    """Fold constant/static shape logic before handing the graph to vendor tools."""
+    try:
+        import onnx
+        from onnxsim import simplify
+    except ImportError as exc:
+        raise RuntimeError(
+            "cann_static export requires onnxsim; install the export dependencies"
+        ) from exc
+    model = onnx.load(str(path), load_external_data=False)
+    simplified, ok = simplify(model, perform_optimization=True, skip_fuse_bn=True)
+    if not ok:
+        raise RuntimeError("ONNX_SIMPLIFY_FAILED: onnxsim returned check=false")
+    onnx.save(simplified, str(path))
+
+
 def _consolidate_external_data(path: Path, *, external_data: bool) -> None:
     import onnx
     from onnx.external_data_helper import convert_model_to_external_data
 
     model = onnx.load(str(path), load_external_data=False)
     if external_data:
-        data_name = f"{path.name}.data"
         convert_model_to_external_data(
             model,
             all_tensors_to_one_file=True,
-            location=data_name,
+            location=f"{path.name}.data",
             size_threshold=0,
         )
-    onnx.save_model(
-        model,
-        str(path),
-        save_as_external_data=external_data,
-        all_tensors_to_one_file=external_data,
-        location=f"{path.name}.data" if external_data else None,
-    )
+        onnx.save_model(
+            model,
+            str(path),
+            save_as_external_data=True,
+            all_tensors_to_one_file=True,
+            location=f"{path.name}.data",
+        )
+    else:
+        onnx.save_model(model, str(path), save_as_external_data=False)
 
 
 def export_qwen_onnx(
@@ -111,12 +127,7 @@ def export_qwen_onnx(
     precision: str = "auto",
     external_data: bool = True,
 ) -> Path:
-    """Export Qwen and normalize it for the selected downstream backend.
-
-    ``generic`` preserves a dynamic diagnostic graph. ``cann_static`` emits a
-    fixed batch/sequence graph, eager attention, explicit position_ids, a
-    target opset, and consolidated ONNX external data suitable for vendor tools.
-    """
+    """Export Qwen for diagnosis or a conservative CANN static smoke test."""
     model_dir = model_dir.expanduser().resolve()
     output = output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -126,6 +137,8 @@ def export_qwen_onnx(
         raise ValueError("batch_size and sequence_length must be positive")
     if precision not in {"auto", "fp32"}:
         raise ValueError(f"unsupported export precision: {precision}")
+    if mode == "cann_static" and opset < 11:
+        raise ValueError("cann_static requires opset >= 11")
 
     _export_with_torch(
         model_dir,
@@ -137,20 +150,24 @@ def export_qwen_onnx(
     )
 
     if mode == "cann_static":
+        _simplify_static(output)
         import onnx
-
         model = onnx.load(str(output), load_external_data=False)
         if ir_version is not None:
             model.ir_version = ir_version
-        model.opset_import[0].version = opset
         onnx.save(model, str(output))
     _consolidate_external_data(output, external_data=external_data)
     return output
 
 
-def audit_onnx(path: str | Path, *, expected_opset: int | None = None, expected_ir: int | None = None,
-               require_static: bool = False) -> dict[str, Any]:
-    """Audit ONNX metadata without loading external tensor payloads."""
+def audit_onnx(
+    path: str | Path,
+    *,
+    expected_opset: int | None = None,
+    expected_ir: int | None = None,
+    require_static: bool = False,
+) -> dict[str, Any]:
+    """Audit ONNX metadata and external data without loading tensor payloads."""
     import onnx
 
     model_path = Path(path).expanduser().resolve()
