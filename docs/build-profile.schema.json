@@ -37,7 +37,14 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "format": {"type": "string"},
+        "format": {"type": "string", "enum": ["onnx"]},
+        "mode": {"type": "string", "enum": ["generic", "cann_static"]},
+        "precision": {"type": "string", "enum": ["auto", "fp32"]},
+        "opset": {"type": "integer", "minimum": 9, "maximum": 20},
+        "ir_version": {"type": "integer", "minimum": 3, "maximum": 12},
+        "batch_size": {"type": "integer", "minimum": 1},
+        "sequence_length": {"type": "integer", "minimum": 1},
+        "external_data": {"type": "boolean"},
         "command": {"type": "array", "items": {"type": "string"}}
       }
     },
