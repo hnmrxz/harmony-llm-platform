@@ -10,16 +10,11 @@ interface ChatMessage {
 }
 
 /*
- * Where the model lives on device, under the app's sandbox files directory.
- * The installed .hllm package is exported to this directory and contains:
- *   config/context.json, config/executor.json
- *   model/<model>.omc, model/SubGraph_0.weight, model/*.embedding_weights, ...
- *   model/tokenizer.json
- * `contextJsonPath` / `executorJsonPath` point at the two engine config files.
+ * The model store root on device (app sandbox files dir). The runtime imports
+ * a `.hllm` into this store and loads the engine files by model id.
  */
-const MODEL_DIR = '/data/storage/el2/base/files/installed/qwen3-8b';
-const CONTEXT_JSON = `${MODEL_DIR}/config/context.json`;
-const EXECUTOR_JSON = `${MODEL_DIR}/config/executor.json`;
+const MODEL_STORE = '/data/storage/el2/base/files/models';
+const HLLM_TO_IMPORT = '/data/storage/el2/base/files/imports/qwen3-8b.hllm';
 
 @Entry
 @Component
@@ -31,6 +26,7 @@ struct Index {
   private scroller: Scroller = new Scroller();
 
   aboutToAppear(): void {
+    llmEngine.init(MODEL_STORE);
     // Register the streaming token callback once.
     llmEngine.answerget((token: string) => {
       Promise.resolve().then(() => {
@@ -42,8 +38,9 @@ struct Index {
   }
 
   loadModel(): string {
-    // context.json / executor.json must already be exported from the .hllm.
-    const result = llmEngine.loadmodel(CONTEXT_JSON, EXECUTOR_JSON);
+    // Import the .hllm into the store, then load it by id.
+    const id = llmEngine.importmodel(HLLM_TO_IMPORT);
+    const result = id === 'IMPORT_FAILED' ? '导入失败' : llmEngine.loadmodel(id);
     this.messages.push({ role: 'assistant', text: result });
     return result;
   }

@@ -1,11 +1,13 @@
 /*
  * LLMEngineModule.cpp — NAPI bridge between the ArkTS UI and the native CANN
- * LLM Engine backend. Its exported surface mirrors the official sample's
- * `CANNLLMEngineDemoNext/entry/src/main/cpp/llm_demo.cpp`:
+ * LLM Engine backend. It extends the official sample's surface with the
+ * runtime's durable model store:
  *
- *   loadmodel(contextJson, executorJson) -> string   (load + report)
- *   modelinfer(question) -> void                     (start async generation)
- *   answerget(callback)  -> void                     (register stream callback)
+ *   init(installRoot)            -> set the model store root
+ *   importmodel(hllmPath) -> id  -> import a .hllm into the store
+ *   loadmodel(id) -> string      -> load the model engine files by id
+ *   modelinfer(question) -> void -> start async generation
+ *   answerget(callback)  -> void -> register stream callback
  *   deinitmodel()        -> void
  *
  * Device-only: built by the HarmonyOS/DevEco CMake target with the NAPI
@@ -19,14 +21,28 @@
 #include <string>
 
 #include "runtime/InferenceBackend.h"
+#include "runtime/ModelManager.h"
 
 using hllm::InferenceBackend;
 using hllm::GenerationCallbacks;
+using hllm::ModelManager;
+using hllm::EngineFiles;
 
 namespace {
 
 std::unique_ptr<InferenceBackend> g_backend;
+std::unique_ptr<ModelManager> g_models;
 napi_threadsafe_function g_stream = nullptr;  // JS-side streaming token callback
+
+// Default app-files model root; init() overrides it.
+const char* kDefaultInstallRoot = "/data/storage/el2/base/files/models";
+
+hllm::ModelManager* EnsureModels() {
+    if (g_models == nullptr) {
+        g_models = std::make_unique<ModelManager>(kDefaultInstallRoot);
+    }
+    return g_models.get();
+}
 
 // Runs on the engine worker thread for every produced token.
 void CallJsToken(napi_env env, napi_value jsCallback, void* /*context*/, void* data) {
@@ -65,25 +81,63 @@ bool ReadTextFile(const std::string& path, std::string& out) {
     return true;
 }
 
-napi_value LoadModel(napi_env env, napi_callback_info info) {
-    size_t argc = 2;
-    napi_value args[2];
+napi_value InitModels(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-    auto readStr = [&](int i) {
+    if (argc >= 1) {
         size_t len = 0;
-        napi_get_value_string_utf8(env, args[i], nullptr, 0, &len);
-        std::string s(len, '\0');
-        napi_get_value_string_utf8(env, args[i], &s[0], len + 1, &len);
-        return s;
-    };
-    if (argc < 2) {
+        napi_get_value_string_utf8(env, args[0], nullptr, 0, &len);
+        std::string root(len, '\0');
+        napi_get_value_string_utf8(env, args[0], &root[0], len + 1, &len);
+        g_models = std::make_unique<ModelManager>(root);
+    } else {
+        EnsureModels();
+    }
+    return nullptr;
+}
+
+napi_value ImportModel(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 1) {
+        return nullptr;
+    }
+    size_t len = 0;
+    napi_get_value_string_utf8(env, args[0], nullptr, 0, &len);
+    std::string hllmPath(len, '\0');
+    napi_get_value_string_utf8(env, args[0], &hllmPath[0], len + 1, &len);
+
+    std::string modelId;
+    std::vector<std::string> errors;
+    bool ok = EnsureModels()->ImportPackage(hllmPath, modelId, errors);
+
+    napi_value result;
+    napi_create_string_utf8(env, ok ? modelId.c_str() : "IMPORT_FAILED", NAPI_AUTO_LENGTH, &result);
+    return result;
+}
+
+napi_value LoadModel(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 1) {
         napi_value result;
         napi_create_string_utf8(env, "invalid arguments", NAPI_AUTO_LENGTH, &result);
         return result;
     }
-    std::string contextJsonPath = readStr(0);
-    std::string executorJsonPath = readStr(1);
+    size_t len = 0;
+    napi_get_value_string_utf8(env, args[0], nullptr, 0, &len);
+    std::string modelId(len, '\0');
+    napi_get_value_string_utf8(env, args[0], &modelId[0], len + 1, &len);
 
+    EngineFiles files;
+    if (!EnsureModels()->GetEngineFiles(modelId, files)) {
+        napi_value result;
+        napi_create_string_utf8(env, "模型未安装", NAPI_AUTO_LENGTH, &result);
+        return result;
+    }
     if (g_backend == nullptr) {
         g_backend = hllm::CreateCannEngineBackend();
     }
@@ -92,9 +146,10 @@ napi_value LoadModel(napi_env env, napi_callback_info info) {
         napi_create_string_utf8(env, "failed to create backend", NAPI_AUTO_LENGTH, &result);
         return result;
     }
+
     std::string contextJson, executorJson;
-    bool ok = ReadTextFile(contextJsonPath, contextJson) &&
-              ReadTextFile(executorJsonPath, executorJson) &&
+    bool ok = ReadTextFile(files.contextJsonPath, contextJson) &&
+              ReadTextFile(files.executorJsonPath, executorJson) &&
               g_backend->LoadModel(contextJson, executorJson);
 
     napi_value result;
@@ -160,6 +215,8 @@ napi_value DeinitModel(napi_env env, napi_callback_info info) {
 
 napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
+        {"init", nullptr, InitModels, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"importmodel", nullptr, ImportModel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"loadmodel", nullptr, LoadModel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"modelinfer", nullptr, ModelInfer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"answerget", nullptr, AnswerGet, nullptr, nullptr, nullptr, napi_default, nullptr},
