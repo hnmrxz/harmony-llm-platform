@@ -116,6 +116,73 @@ def _collect_external_locations(path: Path) -> list[str]:
     return sorted(set(locations))
 
 
+def _normalize_external_data_metadata(path: str | Path) -> dict[str, Any]:
+    """Make external tensor ranges explicit for legacy CANN/OMG parsers.
+
+    ONNX permits a location-only external_data entry when a tensor occupies the
+    whole external file. CANN 6.x OMG can interpret a missing length as zero and
+    fail with SetWeightDataOfSizeZero. PyTorch's legacy exporter writes one file
+    per initializer, so the file size is the exact payload size.
+    """
+    import onnx
+
+    model_path = Path(path).expanduser().resolve()
+    model = onnx.load(str(model_path), load_external_data=False)
+    root = model_path.parent.resolve()
+    locations: dict[str, list[Any]] = {}
+    for initializer in model.graph.initializer:
+        location = next((entry.value for entry in initializer.external_data if entry.key == "location"), None)
+        if location:
+            locations.setdefault(location, []).append(initializer)
+
+    changed = 0
+    normalized: list[dict[str, Any]] = []
+    for location, initializers in locations.items():
+        candidate = (root / location).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise RuntimeError(f"ONNX_EXTERNAL_DATA_ESCAPE: {location}") from exc
+        if not candidate.is_file():
+            raise RuntimeError(f"ONNX_EXTERNAL_DATA_MISSING: {location}")
+        if len(initializers) != 1:
+            for initializer in initializers:
+                keys = {entry.key for entry in initializer.external_data}
+                if "offset" not in keys or "length" not in keys:
+                    raise RuntimeError(
+                        "ONNX_EXTERNAL_DATA_RANGE_REQUIRED: "
+                        f"shared external file {location!r} needs offset/length "
+                        f"for initializer {initializer.name!r}"
+                    )
+            continue
+
+        initializer = initializers[0]
+        entries = {entry.key: entry for entry in initializer.external_data}
+        file_size = candidate.stat().st_size
+        offset = int(entries["offset"].value) if "offset" in entries else 0
+        length = int(entries["length"].value) if "length" in entries else file_size - offset
+        if offset < 0 or length < 0 or offset + length > file_size:
+            raise RuntimeError(
+                "ONNX_EXTERNAL_DATA_RANGE_INVALID: "
+                f"{location!r} offset={offset} length={length} file_size={file_size}"
+            )
+        if "offset" not in entries:
+            entry = initializer.external_data.add()
+            entry.key = "offset"
+            entry.value = str(offset)
+            changed += 1
+        if "length" not in entries:
+            entry = initializer.external_data.add()
+            entry.key = "length"
+            entry.value = str(length)
+            changed += 1
+        normalized.append({"location": location, "offset": offset, "length": length})
+
+    if changed:
+        model_path.write_bytes(model.SerializeToString())
+    return {"changed": changed, "external_data": normalized}
+
+
 def _validate_external_files(path: Path) -> None:
     locations = _collect_external_locations(path)
     root = path.parent.resolve()
@@ -204,8 +271,8 @@ def export_qwen_onnx(
 
     if mode == "cann_static":
         if external_data:
-            # Do not run onnxsim or onnx.save on a model containing unloaded external tensors.
-            # Preserve every exporter-created weight file byte-for-byte.
+            # Normalize implicit whole-file ranges before CANN preflight/OMG.
+            _normalize_external_data_metadata(output)
             _validate_external_files(output)
             _set_ir_version_preserving_external_data(output, ir_version)
         else:
