@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from hllm.backends.commands import ExternalCommandError
+from hllm.backends.omg import build_omg_command
 from hllm.config import BuildProfile, load_profile
 from hllm.download.huggingface import download_model
 from hllm.models.adapters import default_registry
@@ -41,6 +42,7 @@ def _default_profile(request: BuildRequest) -> BuildProfile:
         preferred_path=None,
         fallback_path=None,
         target_chip=request.target_chip,
+        platform=None,
         runtime_version=None,
         quantization=request.quantization,
         bits=4 if request.quantization == "int4" else 8,
@@ -78,14 +80,10 @@ def _resolve_source(request: BuildRequest) -> tuple[Path, str | None]:
 
 def _validate_request_against_profile(profile: BuildProfile, request: BuildRequest) -> None:
     if profile.target_chip.strip() != request.target_chip.strip():
-        raise ValueError(
-            f"profile target '{profile.target_chip}' does not match requested target '{request.target_chip}'"
-        )
+        raise ValueError(f"profile target '{profile.target_chip}' does not match requested target '{request.target_chip}'")
     configured = profile.model_source.strip()
     if _is_repo_id(configured) and _is_repo_id(request.source) and configured != request.source:
-        raise ValueError(
-            f"profile model.source '{configured}' does not match requested model '{request.source}'"
-        )
+        raise ValueError(f"profile model.source '{configured}' does not match requested model '{request.source}'")
 
 
 def build(request: BuildRequest) -> dict:
@@ -135,12 +133,15 @@ def build(request: BuildRequest) -> dict:
 
         if request.dry_run:
             stages = [Stage.DOWNLOAD, Stage.INSPECT, Stage.PLAN]
-            if not (metadata.is_fp8 and profile.supports_fp8_input): stages.append(Stage.QUANTIZE)
+            if not (metadata.is_fp8 and profile.supports_fp8_input):
+                stages.append(Stage.QUANTIZE)
             stages.extend([Stage.EXPORT, Stage.CANN_CONVERT, Stage.VALIDATE, Stage.PACKAGE])
+            if profile.conversion_tool == "omg":
+                runner.state.record(f"cann_command={profile.conversion_tool} framework={profile.framework} target={profile.cann_target} platform={profile.platform}")
             return {"status": "success", "dry_run": True, "model": metadata.name, "adapter": match.family,
-                    "dtype": metadata.dtype, "inventory": asdict(inventory),
-                    "resource_estimate": asdict(estimate) if estimate else None, "resource_ok": resource_ok,
-                    "resource_warning": resource_error, "stages": [stage.value for stage in stages], "logs": runner.state.logs}
+                    "dtype": metadata.dtype, "inventory": asdict(inventory), "resource_estimate": asdict(estimate) if estimate else None,
+                    "resource_ok": resource_ok, "resource_warning": resource_error, "stages": [stage.value for stage in stages],
+                    "logs": runner.state.logs}
 
         context = ExecutionContext(model=source, work=runner.work_dir, output=runner.dist_dir,
                                    target=profile.target_chip, quant=profile.quantization)
@@ -150,23 +151,30 @@ def build(request: BuildRequest) -> dict:
         else:
             runner.state.record("skip=quantize reason=fp8_input")
         runner.enter(Stage.EXPORT)
-        if profile.export_command: executor.run((profile.export_command,))
-        else: runner.state.record("skip=export reason=no_profile_command")
-        runner.enter(Stage.CANN_CONVERT); executor.run(profile.cann_commands)
+        if profile.export_command:
+            executor.run((profile.export_command,))
+        else:
+            runner.state.record("skip=export reason=no_profile_command")
+        runner.enter(Stage.CANN_CONVERT)
+        cann_commands = profile.cann_commands
+        if not cann_commands and profile.conversion_tool == "omg":
+            onnx_candidates = sorted(runner.work_dir.rglob("*.onnx"))
+            if not onnx_candidates:
+                raise RuntimeError("no ONNX artifact found for OMG conversion")
+            generated = build_omg_command(profile, model=onnx_candidates[0], output=runner.work_dir / "final" / "model")
+            cann_commands = (generated,)
+        executor.run(cann_commands)
         model_files = assemble_artifacts(source, runner.work_dir / "final")
         if not model_files:
             raise RuntimeError("no final artifacts found under work/final; target profile must create a deployable artifact")
         runner.enter(Stage.VALIDATE)
-        manifest = Manifest(
-            schema_version="1.0",
+        manifest = Manifest(schema_version="1.0",
             model=ModelInfo(name=metadata.name, family=match.family, architecture=metadata.architecture or "unknown",
                             source_type="huggingface" if source_id else "local", source_id=source_id or str(source)),
-            quantization=QuantizationInfo(type="fp8" if metadata.is_fp8 else profile.quantization,
-                                          bits=8 if metadata.is_fp8 else profile.bits),
+            quantization=QuantizationInfo(type="fp8" if metadata.is_fp8 else profile.quantization, bits=8 if metadata.is_fp8 else profile.bits),
             target=TargetInfo(backend="cann", chip=profile.target_chip, runtime_version=profile.runtime_version),
             runtime=RuntimeInfo(context_length=profile.context_length),
-            build=BuildInfo(converter_version="0.1.0", python_version=sys.version.split()[0]),
-        )
+            build=BuildInfo(converter_version="0.1.0", python_version=sys.version.split()[0]))
         runner.enter(Stage.PACKAGE)
         package_name = f"{metadata.name}-{profile.target_chip}-{'fp8' if metadata.is_fp8 else profile.quantization}.hllm"
         package_path = runner.dist_dir / package_name
