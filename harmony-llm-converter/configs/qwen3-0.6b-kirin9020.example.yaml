@@ -1,0 +1,30 @@
+model:
+  source: Qwen/Qwen3-0.6B
+  family: qwen3
+
+pipeline:
+  preferred_path: bf16_to_cann_4bit
+
+quantization:
+  method: cann_4bit
+  bits: 4
+
+export:
+  format: onnx
+  command: []
+
+cann:
+  target_chip: kirin9020
+  runtime_version: REPLACE_WITH_VALIDATED_RUNTIME_VERSION
+  commands: []
+
+runtime:
+  context_length: 8192
+  capabilities:
+    text: true
+    image: false
+    video: false
+
+output:
+  directory: ./build/qwen3-0.6b
+  package_extension: .hllm
