@@ -2,7 +2,7 @@ from pathlib import Path
 
 import onnx
 
-from hllm.backends.onnx import audit_onnx, normalize_onnx_node_names
+from hllm.backends.onnx import _normalize_external_data_metadata, audit_onnx, normalize_onnx_node_names
 
 
 def _minimal_model(path: Path, opset: int = 11) -> None:
@@ -90,6 +90,34 @@ def test_audit_rejects_missing_external_data(tmp_path: Path) -> None:
     report = audit_onnx(path)
     assert not report["ok"]
     assert any("ONNX_EXTERNAL_DATA_MISSING" in error for error in report["errors"])
+
+
+def test_normalize_external_data_adds_explicit_range(tmp_path: Path) -> None:
+    from onnx import TensorProto, helper
+
+    path = tmp_path / "model.onnx"
+    weights = tmp_path / "weights.bin"
+    weights.write_bytes(b"12345678")
+    tensor = helper.make_tensor("w", TensorProto.FLOAT, [2], [1.0, 2.0])
+    tensor.ClearField("raw_data")
+    tensor.data_location = TensorProto.EXTERNAL
+    entry = tensor.external_data.add()
+    entry.key = "location"
+    entry.value = weights.name
+    model = helper.make_model(
+        helper.make_graph([], "g", [], [], initializer=[tensor]),
+        opset_imports=[helper.make_operatorsetid("", 11)],
+    )
+    onnx.save(model, path)
+
+    result = _normalize_external_data_metadata(path)
+    assert result["changed"] == 2
+    normalized = onnx.load(path, load_external_data=False)
+    metadata = {entry.key: entry.value for entry in normalized.graph.initializer[0].external_data}
+    assert metadata["location"] == weights.name
+    assert metadata["offset"] == "0"
+    assert metadata["length"] == str(weights.stat().st_size)
+    assert weights.read_bytes() == b"12345678"
 
 
 def test_normalize_onnx_node_names_makes_names_short_unique(tmp_path: Path) -> None:
