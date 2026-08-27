@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# HarmonyOS / DevEco build outputs
+harmony-llm-runtime/entry/build/
+harmony-llm-runtime/entry/.preview/
+harmony-llm-runtime/entry/oh_modules/
+harmony-llm-runtime/.hvigor/
+harmony-llm-runtime/build/
+harmony-llm-runtime/**/build/
+*.hap
+*.hsp
+*.app
