@@ -31,6 +31,13 @@ class BuildProfile:
     conversion_tool: str = "omg"
     framework: int = 5
     cann_target: str = "omc"
+    export_mode: str = "generic"
+    export_precision: str = "auto"
+    export_opset: int = 17
+    export_ir_version: int | None = None
+    export_batch_size: int = 1
+    export_sequence_length: int = 4
+    export_external_data: bool = True
 
     @property
     def supports_fp8_input(self) -> bool:
@@ -101,6 +108,12 @@ def load_profile(path: str | Path) -> BuildProfile:
     if not isinstance(capabilities, dict):
         raise ValueError("runtime.capabilities must be an object")
     platform = str(cann.get("platform")).strip() if cann.get("platform") else None
+    export_mode = str(export.get("mode", "generic"))
+    export_precision = str(export.get("precision", "auto"))
+    export_opset = int(export.get("opset", 11 if export_mode == "cann_static" else 17))
+    export_ir = int(export["ir_version"]) if export.get("ir_version") else None
+    export_batch = int(export.get("batch_size", 1))
+    export_sequence = int(export.get("sequence_length", runtime.get("context_length", 4) or 4))
     return BuildProfile(
         model_source=source,
         model_family=str(model.get("family")) if model.get("family") else None,
@@ -122,6 +135,13 @@ def load_profile(path: str | Path) -> BuildProfile:
         conversion_tool=str(cann.get("conversion_tool", "omg")),
         framework=int(cann.get("framework", 5)),
         cann_target=str(cann.get("target", "omc")),
+        export_mode=export_mode,
+        export_precision=export_precision,
+        export_opset=export_opset,
+        export_ir_version=export_ir,
+        export_batch_size=export_batch,
+        export_sequence_length=export_sequence,
+        export_external_data=bool(export.get("external_data", True)),
     )
 
 
