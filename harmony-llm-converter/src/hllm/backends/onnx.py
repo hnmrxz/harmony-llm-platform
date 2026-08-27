@@ -117,13 +117,7 @@ def _collect_external_locations(path: Path) -> list[str]:
 
 
 def _normalize_external_data_metadata(path: str | Path) -> dict[str, Any]:
-    """Make external tensor ranges explicit for legacy CANN/OMG parsers.
-
-    ONNX permits a location-only external_data entry when a tensor occupies the
-    whole external file. CANN 6.x OMG can interpret a missing length as zero and
-    fail with SetWeightDataOfSizeZero. PyTorch's legacy exporter writes one file
-    per initializer, so the file size is the exact payload size.
-    """
+    """Make external tensor ranges explicit for legacy CANN/OMG parsers."""
     import onnx
 
     model_path = Path(path).expanduser().resolve()
@@ -200,14 +194,14 @@ def _validate_external_files(path: Path) -> None:
 
 
 def normalize_onnx_node_names(path: str | Path) -> dict[str, Any]:
-    """Normalize node names for the legacy Kirin OMG ONNX parser.
+    """Normalize node names for CANN 6.x's legacy OMG parser.
 
-    PyTorch's legacy exporter can emit long hierarchical node names.  CANN 6.x's
-    ONNX parser has a fragile user-node-name update pass which can fail while
-    rebuilding its internal operator map.  Node names are metadata only: graph
-    edges reference tensor names, not node names.  Give every node a short,
-    deterministic, unique identifier while leaving tensor names and external
-    weight payloads untouched.
+    OMG's UpdateUserSetNodeNames pass resolves explicitly named operators through
+    its tensor/operator map. Arbitrary synthetic names therefore still fail even
+    when they are unique. The first output tensor is the stable operator key in
+    the exported graph, so use it as the node name. This is metadata-only: graph
+    edges continue to reference tensor names and external weight bytes are never
+    loaded or rewritten.
     """
     import onnx
 
@@ -219,12 +213,16 @@ def normalize_onnx_node_names(path: str | Path) -> dict[str, Any]:
 
     for index, node in enumerate(model.graph.node):
         original = node.name
-        candidate = f"n{index:06d}_{node.op_type}"
-        if original and original == candidate and candidate not in seen:
-            seen.add(candidate)
+        base = node.output[0] if node.output else f"hllm_node_{index:06d}"
+        candidate = base
+        if candidate in seen:
+            candidate = f"{base}__{index:06d}"
+        if not candidate:
+            candidate = f"hllm_node_{index:06d}"
+        seen.add(candidate)
+        if original == candidate:
             continue
         node.name = candidate
-        seen.add(candidate)
         changed += 1
         renamed.append((original, candidate))
 
@@ -271,7 +269,6 @@ def export_qwen_onnx(
 
     if mode == "cann_static":
         if external_data:
-            # Normalize implicit whole-file ranges before CANN preflight/OMG.
             _normalize_external_data_metadata(output)
             _validate_external_files(output)
             _set_ir_version_preserving_external_data(output, ir_version)
@@ -294,12 +291,6 @@ def audit_onnx(
 
     model_path = Path(path).expanduser().resolve()
     model = onnx.load(str(model_path), load_external_data=False)
-
-    # Validate external-data references ourselves first. Then ask ONNX checker to
-    # resolve the model from its path so it can locate external payloads relative
-    # to the protobuf file. Passing an unloaded ModelProto to check_model() is
-    # invalid for external-data models and raises the exact "should be stored in
-    # ... but it is not regular file" ValidationError seen in production.
     _validate_external_files(model_path)
     onnx.checker.check_model(str(model_path), full_check=False)
 
