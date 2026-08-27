@@ -22,7 +22,12 @@ class ModelMetadata:
 
     @property
     def is_fp8(self) -> bool:
-        return bool(self.dtype and "float8" in self.dtype.lower())
+        # _normalize_dtype maps "float8_e4m3fn" -> "fp8_e4m3fn"; accept both
+        # spellings so FP8 input detection is not silently disabled.
+        if not self.dtype:
+            return False
+        dtype = self.dtype.lower()
+        return "float8" in dtype or "fp8" in dtype
 
 
 def _read_json(path: Path) -> dict[str, Any]:

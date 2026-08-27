@@ -28,6 +28,10 @@ class BuildProfile:
     export_command: tuple[str, ...] = ()
     quantization_commands: tuple[tuple[str, ...], ...] = ()
     capabilities: tuple[tuple[str, bool], ...] = ()
+    # Official CANN path: drive OMG with the graph-aware parameter set (layout
+    # derived from the model config) and consume the dopt quant-param file.
+    official_cann: bool = False
+    cann_quant_params_file: Path | None = None
     conversion_tool: str = "omg"
     framework: int = 5
     cann_target: str = "omc"
@@ -135,6 +139,9 @@ def load_profile(path: str | Path) -> BuildProfile:
         conversion_tool=str(cann.get("conversion_tool", "omg")),
         framework=int(cann.get("framework", 5)),
         cann_target=str(cann.get("target", "omc")),
+        official_cann=bool(cann.get("official_omg", False)),
+        cann_quant_params_file=Path(str(cann["quant_params_file"])).expanduser()
+        if cann.get("quant_params_file") else None,
         export_mode=export_mode,
         export_precision=export_precision,
         export_opset=export_opset,

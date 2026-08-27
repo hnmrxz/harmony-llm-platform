@@ -7,6 +7,7 @@ import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from hllm.backends.cann_omg import OmgSpec, build_official_omg_command
 from hllm.backends.commands import ExternalCommandError
 from hllm.backends.omg import build_omg_command
 from hllm.backends.onnx import audit_onnx, export_qwen_onnx, normalize_onnx_node_names, write_audit
@@ -14,6 +15,7 @@ from hllm.config import BuildProfile, load_profile
 from hllm.download.huggingface import download_model
 from hllm.models.adapters import default_registry
 from hllm.models.detector import inspect_model
+from hllm.models.layout import load_layout
 from hllm.models.weights import inspect_weight_index
 from hllm.packaging.artifacts import assemble_artifacts
 from hllm.packaging.hllm import package_hllm
@@ -133,8 +135,8 @@ def _prepare_final_dir(work_dir: Path) -> Path:
     return final_dir
 
 
-def _run_cann_conversion(profile: BuildProfile, onnx_path: Path, runner: PipelineRunner,
-                         executor: StageExecutor) -> None:
+def _run_cann_conversion(profile: BuildProfile, onnx_path: Path, source: Path,
+                         runner: PipelineRunner, executor: StageExecutor) -> None:
     final_dir = _prepare_final_dir(runner.work_dir)
     # DDK releases can reject otherwise-valid long output paths under /opt.
     # A short /tmp staging path is known to pass the same validator; conversion
@@ -143,6 +145,18 @@ def _run_cann_conversion(profile: BuildProfile, onnx_path: Path, runner: Pipelin
     try:
         if profile.cann_commands:
             commands = profile.cann_commands
+        elif profile.official_cann:
+            # Official CANN path: build the graph-aware OMG command from the
+            # model geometry and the dopt quant-param file.
+            layout = load_layout(source)
+            spec = OmgSpec(
+                model=onnx_path,
+                output=staging / "model",
+                layout=layout,
+                platform=profile.platform or profile.target_chip,
+                quant_params_file=profile.cann_quant_params_file,
+            )
+            commands = (build_official_omg_command(spec),)
         elif profile.conversion_tool == "omg":
             commands = (build_omg_command(profile, model=onnx_path, output=staging / "model"),)
         else:
@@ -259,7 +273,7 @@ def build(request: BuildRequest) -> dict:
         )
 
         runner.enter(Stage.CANN_CONVERT)
-        _run_cann_conversion(profile, onnx_path, runner, executor)
+        _run_cann_conversion(profile, onnx_path, source, runner, executor)
         final_dir = runner.work_dir / "final"
         model_files = assemble_artifacts(source, final_dir)
         if not model_files:

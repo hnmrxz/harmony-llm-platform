@@ -60,7 +60,9 @@
         "conversion_tool": {"type": "string", "enum": ["atc", "omg"]},
         "framework": {"type": "integer", "minimum": 0},
         "target": {"type": "string"},
-        "commands": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}}
+        "commands": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}},
+        "official_omg": {"type": "boolean"},
+        "quant_params_file": {"type": "string"}
       }
     },
     "runtime": {

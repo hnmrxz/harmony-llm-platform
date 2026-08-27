@@ -25,9 +25,14 @@ class ExecutionContext:
             "target": self.target,
             "quant": self.quant,
         }
+        # Substitute $var / ${var} placeholders first so a legacy {key} literal
+        # that happens to sit inside a ${...} expression (e.g. "${model}") is
+        # not corrupted by the brace replace below. The legacy {key} form is
+        # still resolved in a second, targeted pass.
+        value = Template(value).safe_substitute(replacements)
         for key, replacement in replacements.items():
             value = value.replace("{" + key + "}", replacement)
-        return Template(value).safe_substitute(replacements)
+        return value
 
 
 class StageExecutor:
