@@ -16,11 +16,14 @@ def build_omg_command(profile: BuildProfile, *, model: Path, output: Path) -> tu
     platform = (profile.platform or "").strip()
     if not platform:
         raise ValueError("Kirin OMC profile requires cann.platform (for example: kirinx90)")
+    model_path = model.expanduser().resolve()
+    output_path = output.expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     return (
         "omg",
-        f"--model={model}",
+        f"--model={model_path}",
         "--framework=5",
-        f"--output={output}",
+        f"--output={output_path}",
         "--target=omc",
         f"--platform={platform}",
     )
