@@ -64,6 +64,8 @@ def _export_with_torch(
 
     wrapper = LogitsWrapper(model)
     with torch.no_grad():
+        # PyTorch 2.x/2.13 uses ``external_data``.  The old
+        # ``use_external_data_format`` keyword is not part of the current API.
         torch.onnx.export(
             wrapper,
             (input_ids, attention_mask, position_ids),
@@ -73,7 +75,7 @@ def _export_with_torch(
             opset_version=opset,
             do_constant_folding=True,
             dynamo=False,
-            use_external_data_format=external_data,
+            external_data=external_data,
         )
     return output
 
@@ -159,8 +161,8 @@ def export_qwen_onnx(
     )
 
     if mode == "cann_static":
-        # Do not run onnxsim or onnx.save on a model containing unloaded external tensors.
-        # For external-data exports we only rewrite the ModelProto header and preserve files verbatim.
+        # External-data payloads are owned by the exporter and must be preserved
+        # verbatim. Re-saving an unloaded ModelProto can corrupt the payload links.
         if external_data:
             _validate_external_files(output)
             _set_ir_version_preserving_external_data(output, ir_version)
