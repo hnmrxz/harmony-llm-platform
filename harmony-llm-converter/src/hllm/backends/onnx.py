@@ -132,6 +132,41 @@ def _validate_external_files(path: Path) -> None:
         raise RuntimeError(f"ONNX_EXTERNAL_DATA_MISSING: {missing}")
 
 
+def normalize_onnx_node_names(path: str | Path) -> dict[str, Any]:
+    """Normalize node names for the legacy Kirin OMG ONNX parser.
+
+    PyTorch's legacy exporter can emit long hierarchical node names.  CANN 6.x's
+    ONNX parser has a fragile user-node-name update pass which can fail while
+    rebuilding its internal operator map.  Node names are metadata only: graph
+    edges reference tensor names, not node names.  Give every node a short,
+    deterministic, unique identifier while leaving tensor names and external
+    weight payloads untouched.
+    """
+    import onnx
+
+    model_path = Path(path).expanduser().resolve()
+    model = onnx.load(str(model_path), load_external_data=False)
+    changed = 0
+    seen: set[str] = set()
+    renamed: list[tuple[str, str]] = []
+
+    for index, node in enumerate(model.graph.node):
+        original = node.name
+        candidate = f"n{index:06d}_{node.op_type}"
+        if original and original == candidate and candidate not in seen:
+            seen.add(candidate)
+            continue
+        node.name = candidate
+        seen.add(candidate)
+        changed += 1
+        renamed.append((original, candidate))
+
+    if changed:
+        model_path.write_bytes(model.SerializeToString())
+
+    return {"changed": changed, "renamed": renamed}
+
+
 def export_qwen_onnx(
     model_dir: Path,
     output: Path,
@@ -176,6 +211,7 @@ def export_qwen_onnx(
         else:
             _simplify_static(output)
             _set_ir_version_preserving_external_data(output, ir_version)
+        normalize_onnx_node_names(output)
     return output
 
 
