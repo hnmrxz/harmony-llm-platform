@@ -79,12 +79,24 @@ harmony-llm-runtime/
     │   └── LLMEngineApi.h                  # LLM Engine C-API 契约
     ├── backends/cann/
     │   └── CannBackend.cpp                 # LLM Engine 实现
-    └── model_package/
-        ├── Manifest.h
-        ├── EngineConfig.h                  # context.json / executor.json 类型
-        ├── PackageReader.h / .cpp          # .hllm 校验 / 定位引擎文件
-        ├── Json.h / .cpp                   # 轻量 JSON 解析
-        └── Sha256.h / .cpp                 # 完整性校验用 SHA-256
+    ├── test/
+    │   ├── make_test_hllm.py               # 生成一个 deflate 压缩的 .hllm 测试包
+    │   ├── host_import_test.cpp            # 主机侧导入流程测试（无需 OHOS/NAPI）
+    │   └── run_host_test.sh
+    └── native/
+        ├── runtime/
+        │   ├── InferenceBackend.h          # 抽象推理接口（LLM Engine 生命周期）
+        │   └── LLMEngineApi.h              # LLM Engine C-API 契约
+        ├── backends/cann/
+        │   └── CannBackend.cpp             # LLM Engine 实现
+        └── model_package/
+            ├── Manifest.h
+            ├── EngineConfig.h              # context.json / executor.json 类型
+            ├── ZipReader.h / .cpp          # .hllm（ZIP）解包（stored + deflate）
+            ├── Inflate.h / .cpp            # 自包含 DEFLATE 解压（无需 zlib）
+            ├── PackageReader.h / .cpp      # .hllm 校验 / 定位引擎文件
+            ├── Json.h / .cpp               # 轻量 JSON 解析
+            └── Sha256.h / .cpp             # 完整性校验用 SHA-256
 ```
 
 ## 三、模型包（.hllm）
@@ -140,17 +152,40 @@ class InferenceBackend {
 
 ### `native/model_package/`
 
-`PackageReader` 在解包后校验：
+导入链路：
 
 ```text
-manifest.json 可解析
+.hllm
+  ├─ ZipReader.ExtractAll()   解包（stored + deflate）
+  │    ├─ Inflate.h/.cpp      自包含 DEFLATE 解压（不依赖 zlib）
+  │    └─ 拒绝路径穿越（绝对路径 / ..）
+  ├─ PackageReader.ReadManifest()  解析 manifest.json（用 Json.h）
+  ├─ PackageReader.VerifyIntegrity()  每个 artifact 存在 + SHA-256 匹配
+  └─ PackageReader.LocateEngineFiles()  定位 .omc / 权重目录 / embedding /
+                                        context.json / executor.json / tokenizer.json
+```
+
+`manifest.json` 校验：
+
+```text
+可解析
 schema_version == 1.0
 每个 artifact 路径不越界（无绝对路径 / ..）
 每个 artifact 存在 + SHA-256 匹配
-定位 .omc / SubGraph_0.weight 目录 / embedding / context.json / executor.json / tokenizer.json
 ```
 
-`Json.h/.cpp` 与 `Sha256.h/.cpp` 为无依赖实现；真机可用平台 JSON / 密码学库替换而不影响调用方。
+`Json.h/.cpp`、`Sha256.h/.cpp`、`Inflate.h/.cpp` 均为无依赖实现；真机可用平台 JSON / 密码学 / archive 库替换而不影响调用方。
+
+### 主机侧导入测试（无需 OHOS）
+
+`native/` 与 `test/` 可在普通 Linux 上用宿主 g++ 直接编译验证完整导入流程：
+
+```bash
+cd harmony-llm-runtime
+bash test/run_host_test.sh
+```
+
+该测试用 Python 生成一个 deflate 压缩的 `.hllm`，用 ZipReader 解包、PackageReader 校验并定位引擎文件，全部通过即证明导入链路正确。
 
 ## 五、NAPI 桥（entry/src/main/cpp/LLMEngineModule.cpp）
 

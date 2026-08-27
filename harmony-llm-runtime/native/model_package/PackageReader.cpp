@@ -70,7 +70,11 @@ bool NormalizeRelPath(const std::string& relPath, std::string& outNormalized) {
 }
 
 std::string GetString(const Value* v, const std::string& key) {
-    return v != nullptr && v->is_object() ? v->get(key)->as_string() : std::string();
+    if (v == nullptr || !v->is_object()) {
+        return std::string();
+    }
+    const Value* child = v->get(key);
+    return child != nullptr ? child->as_string() : std::string();
 }
 
 std::int64_t GetInt(const Value* v, const std::string& key, std::int64_t fallback = 0) {

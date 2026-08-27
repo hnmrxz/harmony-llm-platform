@@ -46,6 +46,8 @@ set(HLLM_NATIVE_SRC
     ${HLLM_NATIVE_ROOT}/model_package/Json.cpp
     ${HLLM_NATIVE_ROOT}/model_package/Sha256.cpp
     ${HLLM_NATIVE_ROOT}/model_package/PackageReader.cpp
+    ${HLLM_NATIVE_ROOT}/model_package/ZipReader.cpp
+    ${HLLM_NATIVE_ROOT}/model_package/Inflate.cpp
 )
 
 add_library(entry SHARED LLMEngineModule.cpp ${HLLM_NATIVE_SRC})
