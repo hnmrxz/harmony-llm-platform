@@ -15,6 +15,7 @@ export:
 
 cann:
   target_chip: KirinX90
+  platform: kirinx90
   runtime_version: REPLACE_WITH_VALIDATED_RUNTIME_VERSION
   conversion_tool: omg
   framework: 5
