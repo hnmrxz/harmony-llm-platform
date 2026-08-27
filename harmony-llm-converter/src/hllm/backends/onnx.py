@@ -291,8 +291,19 @@ def audit_onnx(
 
     model_path = Path(path).expanduser().resolve()
     model = onnx.load(str(model_path), load_external_data=False)
-    _validate_external_files(model_path)
-    onnx.checker.check_model(str(model_path), full_check=False)
+
+    # Collect validation failures into `errors` and report (ok=False) rather
+    # than raising, so the build pipeline gets a structured ONNX_PREFLIGHT_FAILED
+    # instead of a raw exception.
+    errors: list[str] = []
+    try:
+        _validate_external_files(model_path)
+    except RuntimeError as exc:
+        errors.append(str(exc))
+    try:
+        onnx.checker.check_model(str(model_path), full_check=False)
+    except Exception as exc:  # noqa: BLE001 - report, don't abort the audit
+        errors.append(f"onnx_checker: {exc}")
 
     dynamic_inputs: list[str] = []
     for value in model.graph.input:
@@ -305,7 +316,6 @@ def audit_onnx(
     external = sum(bool(initializer.external_data) for initializer in model.graph.initializer)
     external_locations = _collect_external_locations(model_path)
 
-    errors: list[str] = []
     if expected_opset is not None and opset != expected_opset:
         errors.append(f"opset={opset}, expected={expected_opset}")
     if expected_ir is not None and model.ir_version != expected_ir:

@@ -44,6 +44,7 @@ def test_audit_external_data_by_model_path(tmp_path: Path) -> None:
 
     tensor = helper.make_tensor("w", TensorProto.FLOAT, [1], [1.0])
     tensor.ClearField("raw_data")
+    tensor.ClearField("float_data")
     tensor.data_location = TensorProto.EXTERNAL
     entry = tensor.external_data.add()
     entry.key = "location"
@@ -75,6 +76,7 @@ def test_audit_rejects_missing_external_data(tmp_path: Path) -> None:
     path = tmp_path / "model.onnx"
     tensor = helper.make_tensor("w", TensorProto.FLOAT, [1], [1.0])
     tensor.ClearField("raw_data")
+    tensor.ClearField("float_data")
     tensor.data_location = TensorProto.EXTERNAL
     entry = tensor.external_data.add()
     entry.key = "location"
@@ -144,7 +146,9 @@ def test_normalize_onnx_node_names_makes_names_short_unique(tmp_path: Path) -> N
 
     normalized = onnx.load(path, load_external_data=False)
     names = [node.name for node in normalized.graph.node]
-    assert names == ["n000000_Identity", "n000001_Identity", "n000002_Identity"]
+    # The OMG boundary names nodes after their (stable) first output tensor;
+    # duplicates are disambiguated with a numeric suffix.
+    assert names == ["y", "z", "out"]
     assert len(names) == len(set(names))
     assert [list(node.input) for node in normalized.graph.node] == [["x"], ["y"], ["z"]]
     assert [list(node.output) for node in normalized.graph.node] == [["y"], ["z"], ["out"]]
