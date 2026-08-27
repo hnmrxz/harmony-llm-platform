@@ -47,6 +47,14 @@ def _normalize_dtype(value: Any) -> str | None:
     return aliases.get(text, text)
 
 
+def _header_parameter_count(model_dir: Path) -> int | None:
+    try:
+        from hllm.models.weights import inspect_weight_index
+        return inspect_weight_index(model_dir).parameter_count
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def inspect_model(path: str | Path) -> ModelMetadata:
     root = Path(path).expanduser().resolve()
     if not root.is_dir():
@@ -70,6 +78,8 @@ def inspect_model(path: str | Path) -> ModelMetadata:
         or config.get("max_position_embeddings")
     )
     parameter_count = config.get("num_parameters") or effective.get("num_parameters")
+    if parameter_count is None:
+        parameter_count = _header_parameter_count(root)
 
     tokenizer_files = ("tokenizer.json", "tokenizer.model", "tokenizer_config.json")
     has_tokenizer = any((root / name).exists() for name in tokenizer_files)
