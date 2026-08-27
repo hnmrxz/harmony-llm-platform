@@ -148,8 +148,7 @@ def build(request: BuildRequest) -> dict:
 
         if request.dry_run:
             stages = [Stage.DOWNLOAD, Stage.INSPECT, Stage.PLAN]
-            if not (metadata.is_fp8 and profile.supports_fp8_input):
-                stages.append(Stage.QUANTIZE)
+            if not (metadata.is_fp8 and profile.supports_fp8_input): stages.append(Stage.QUANTIZE)
             stages.extend([Stage.EXPORT, Stage.CANN_CONVERT, Stage.VALIDATE, Stage.PACKAGE])
             if profile.conversion_tool == "omg":
                 runner.state.record(f"cann_command={profile.conversion_tool} framework={profile.framework} target={profile.cann_target} platform={profile.platform}")
@@ -174,7 +173,9 @@ def build(request: BuildRequest) -> dict:
         runner.enter(Stage.CANN_CONVERT)
         cann_commands = profile.cann_commands
         if not cann_commands and profile.conversion_tool == "omg":
-            generated = build_omg_command(profile, model=onnx_path, output=runner.work_dir / "final" / "model")
+            final_dir = runner.work_dir / "final"
+            final_dir.mkdir(parents=True, exist_ok=True)
+            generated = build_omg_command(profile, model=onnx_path, output=final_dir / "model")
             cann_commands = (generated,)
         if not cann_commands:
             raise RuntimeError("no CANN conversion command configured")
