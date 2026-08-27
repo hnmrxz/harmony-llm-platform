@@ -15,6 +15,7 @@ def _export_with_torch(
     batch_size: int,
     sequence_length: int,
     precision: str,
+    external_data: bool,
 ) -> Path:
     try:
         import torch
@@ -72,47 +73,54 @@ def _export_with_torch(
             opset_version=opset,
             do_constant_folding=True,
             dynamo=False,
+            use_external_data_format=external_data,
         )
     return output
 
 
 def _simplify_static(path: Path) -> None:
-    """Fold constant/static shape logic before handing the graph to vendor tools."""
+    """Simplify only self-contained ONNX; never rewrite unloaded external-data tensors."""
     try:
         import onnx
         from onnxsim import simplify
     except ImportError as exc:
-        raise RuntimeError(
-            "cann_static export requires onnxsim; install the export dependencies"
-        ) from exc
-    model = onnx.load(str(path), load_external_data=False)
+        raise RuntimeError("static export with inline weights requires onnxsim") from exc
+    model = onnx.load(str(path), load_external_data=True)
     simplified, ok = simplify(model, perform_optimization=True, skip_fuse_bn=True)
     if not ok:
         raise RuntimeError("ONNX_SIMPLIFY_FAILED: onnxsim returned check=false")
-    onnx.save(simplified, str(path))
+    onnx.save_model(simplified, str(path), save_as_external_data=False)
 
 
-def _consolidate_external_data(path: Path, *, external_data: bool) -> None:
+def _set_ir_version_preserving_external_data(path: Path, ir_version: int | None) -> None:
+    """Change only ModelProto metadata without dereferencing external tensor payloads."""
+    if ir_version is None:
+        return
     import onnx
-    from onnx.external_data_helper import convert_model_to_external_data
 
     model = onnx.load(str(path), load_external_data=False)
-    if external_data:
-        convert_model_to_external_data(
-            model,
-            all_tensors_to_one_file=True,
-            location=f"{path.name}.data",
-            size_threshold=0,
-        )
-        onnx.save_model(
-            model,
-            str(path),
-            save_as_external_data=True,
-            all_tensors_to_one_file=True,
-            location=f"{path.name}.data",
-        )
-    else:
-        onnx.save_model(model, str(path), save_as_external_data=False)
+    model.ir_version = ir_version
+    path.write_bytes(model.SerializeToString())
+
+
+def _validate_external_files(path: Path) -> None:
+    import onnx
+
+    model = onnx.load(str(path), load_external_data=False)
+    missing: list[str] = []
+    for initializer in model.graph.initializer:
+        for entry in initializer.external_data:
+            if entry.key == "location":
+                candidate = (path.parent / entry.value).resolve()
+                try:
+                    candidate.relative_to(path.parent.resolve())
+                except ValueError as exc:
+                    raise RuntimeError(f"ONNX_EXTERNAL_DATA_ESCAPE: {entry.value}") from exc
+                if not candidate.is_file():
+                    missing.append(entry.value)
+                break
+    if missing:
+        raise RuntimeError(f"ONNX_EXTERNAL_DATA_MISSING: {sorted(set(missing))}")
 
 
 def export_qwen_onnx(
@@ -147,16 +155,18 @@ def export_qwen_onnx(
         batch_size=batch_size,
         sequence_length=sequence_length,
         precision=precision,
+        external_data=external_data,
     )
 
     if mode == "cann_static":
-        _simplify_static(output)
-        import onnx
-        model = onnx.load(str(output), load_external_data=False)
-        if ir_version is not None:
-            model.ir_version = ir_version
-        onnx.save(model, str(output))
-    _consolidate_external_data(output, external_data=external_data)
+        # Do not run onnxsim or onnx.save on a model containing unloaded external tensors.
+        # For external-data exports we only rewrite the ModelProto header and preserve files verbatim.
+        if external_data:
+            _validate_external_files(output)
+            _set_ir_version_preserving_external_data(output, ir_version)
+        else:
+            _simplify_static(output)
+            _set_ir_version_preserving_external_data(output, ir_version)
     return output
 
 
@@ -177,7 +187,7 @@ def audit_onnx(
     dynamic_inputs: list[str] = []
     for value in model.graph.input:
         if value.type.HasField("tensor_type") and value.type.tensor_type.HasField("shape"):
-            if any(dim.dim_param or dim.dim_value == 0 for dim in value.type.tensor_type.shape.dim):
+            if any(dim.dim_param for dim in value.type.tensor_type.shape.dim):
                 dynamic_inputs.append(value.name)
 
     opset = next((item.version for item in model.opset_import if item.domain == ""), None)
