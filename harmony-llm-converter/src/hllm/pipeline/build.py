@@ -37,17 +37,10 @@ class BuildRequest:
 
 def _default_profile(request: BuildRequest) -> BuildProfile:
     return BuildProfile(
-        model_source=request.source,
-        model_family=None,
-        input_quantization=None,
-        preferred_path=None,
-        fallback_path=None,
-        target_chip=request.target_chip,
-        platform=None,
-        runtime_version=None,
-        quantization=request.quantization,
-        bits=4 if request.quantization == "int4" else 8,
-        context_length=request.context_length,
+        model_source=request.source, model_family=None, input_quantization=None,
+        preferred_path=None, fallback_path=None, target_chip=request.target_chip,
+        platform=None, runtime_version=None, quantization=request.quantization,
+        bits=4 if request.quantization == "int4" else 8, context_length=request.context_length,
         output_dir=request.output_dir,
     )
 
@@ -88,15 +81,26 @@ def _validate_request_against_profile(profile: BuildProfile, request: BuildReque
 
 
 def _export_onnx_if_needed(source: Path, work_dir: Path, profile: BuildProfile, adapter_family: str, logger) -> Path:
-    existing = sorted(work_dir.rglob("*.onnx"))
-    if existing:
+    export_dir = work_dir / "export"
+    output = export_dir / "model.onnx"
+    existing = sorted(export_dir.glob("*.onnx"))
+    if profile.export_mode == "cann_static":
+        if existing:
+            report = audit_onnx(existing[0], expected_opset=profile.export_opset,
+                                expected_ir=profile.export_ir_version, require_static=True)
+            if report["ok"]:
+                logger(f"onnx_source=existing path={existing[0]}")
+                return existing[0]
+            logger(f"onnx_source=stale reason={report['errors']}")
+        export_dir.mkdir(parents=True, exist_ok=True)
+        for stale in export_dir.iterdir():
+            if stale.is_file():
+                stale.unlink()
+    elif existing:
         logger(f"onnx_source=existing path={existing[0]}")
         return existing[0]
-    if profile.export_command:
-        raise RuntimeError("profile export.command did not create an ONNX artifact")
     if adapter_family != "qwen":
         raise RuntimeError("automatic ONNX export is currently implemented only for Qwen")
-    output = work_dir / "export" / "model.onnx"
     logger(
         f"onnx_export=automatic mode={profile.export_mode} opset={profile.export_opset} "
         f"ir={profile.export_ir_version or 'producer-default'} batch={profile.export_batch_size} "
@@ -104,14 +108,9 @@ def _export_onnx_if_needed(source: Path, work_dir: Path, profile: BuildProfile, 
     )
     try:
         return export_qwen_onnx(
-            source,
-            output,
-            mode=profile.export_mode,
-            opset=profile.export_opset,
-            ir_version=profile.export_ir_version,
-            batch_size=profile.export_batch_size,
-            sequence_length=profile.export_sequence_length,
-            precision=profile.export_precision,
+            source, output, mode=profile.export_mode, opset=profile.export_opset,
+            ir_version=profile.export_ir_version, batch_size=profile.export_batch_size,
+            sequence_length=profile.export_sequence_length, precision=profile.export_precision,
             external_data=profile.export_external_data,
         )
     except Exception as exc:
@@ -178,8 +177,7 @@ def build(request: BuildRequest) -> dict:
                 )
             return {
                 "status": "success", "dry_run": True, "model": metadata.name, "adapter": match.family,
-                "dtype": metadata.dtype, "inventory": asdict(inventory),
-                "resource_estimate": asdict(estimate) if estimate else None,
+                "dtype": metadata.dtype, "inventory": asdict(inventory), "resource_estimate": asdict(estimate) if estimate else None,
                 "resource_ok": resource_ok, "resource_warning": resource_error,
                 "stages": [stage.value for stage in stages], "logs": runner.state.logs,
             }
