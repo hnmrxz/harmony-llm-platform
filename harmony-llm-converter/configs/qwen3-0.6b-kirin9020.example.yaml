@@ -14,7 +14,10 @@ export:
   command: []
 
 cann:
-  target_chip: kirin9020
+  # Marketing/product name: Kirin X90 Plus.
+  # CANN target identity currently follows the Kirin X90 series platform;
+  # verify the actual device value with `hdc shell param get ohos.boot.chiptype`.
+  target_chip: KirinX90
   runtime_version: REPLACE_WITH_VALIDATED_RUNTIME_VERSION
   commands: []
 
@@ -26,5 +29,5 @@ runtime:
     video: false
 
 output:
-  directory: ./build/qwen3-0.6b
+  directory: ./build/qwen3-0.6b-kirinx90
   package_extension: .hllm
