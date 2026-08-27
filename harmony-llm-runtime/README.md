@@ -6,638 +6,259 @@
 
 > **本项目不负责模型转换。HarmonyOS 端只负责模型导入、验证、安装、管理和本地推理。**
 
-## 一、用户完整使用流程
+## 一、与 CANN LLM Engine 的关系
+
+本 Runtime 的推理层直接使用华为官方 **CANN LLM Engine**（`libhiai_llm_engine.so` + `llm_engine_c_api_export.h` 等头文件）。
+
+LLM Engine 已经封装好完整的大模型计算链路：
 
 ```text
-Ubuntu
-  ↓
-生成 .hllm
-  ↓
-复制 / 上传到 HarmonyOS
-  ↓
-Runtime 导入
-  ↓
-SHA-256 / Manifest 校验
-  ↓
-设备兼容性检查
-  ↓
-安装
-  ↓
-Tokenizer / Prompt
-  ↓
-Native Runtime
-  ↓
-CANN / NNRt / NPU
-  ↓
-流式输出
+文本 → 分词 → LLM prefill → LLM Decoder → 输出采样 → 分词解码 → 文本
 ```
 
-Runtime 用户不需要安装：
+并内置**内存复用、KV Cache 管理、投机推理、端云协同、多模态拓展、性能指标**等能力。因此 Runtime 不需要自研 tokenizer、prefill/decode 循环、KV cache 或采样。
+
+对照官方示例（`CANN_LLM_Engine_Demo/CANNLLMEngineDemoNext/.../llm_demo.cpp`），Runtime 端只需要：
 
 ```text
-Python
-PyTorch
-Transformers
-ONNX
-CANN Converter
+1. 读 context.json    → LLMEngine_Context_CreateFromContextJson(text)
+2. 读 executor.json   → LLMEngine_Executor_CreateFromJson(text)
+3. LLMEngine_Prompt_SetText(prompt)  ← 纯文本（不再需要 tokenizer）
+4. LLMEngine_Executor_LLM_GenerateAsync(executor, context, prompt)
+5. 通过 LLMEngine_Context_SetOnSomeTokenGenerateDoneFunc 回调拿到流式 token
+6. 通过 LLMEngine_Context_Get*TimeMs / Get*TokenCount 拿到内置指标
 ```
 
-## 二、支持的输入
+> Runtime 唯一需要自处理的只是**聊天模板**：把用户消息按模型 `chat_template` 渲染成一段文本，再交给 `LLMEngine_Prompt_SetText`。这是纯字符串层，不涉及 tokenizer。
 
-普通用户入口只接受：
+### 与旧设计的区别
+
+历史版本把推理接口建模为**低阶 NNRt**（`OH_NNCompilation_ConstructWithOfflineModelBuffer` + `OH_NNExecutor_RunSync`），需要 Runtime 自己实现完整 LLM 链路。现在改为 LLM Engine 生命周期接口，大幅简化：
+
+| 项 | 旧（低阶 NNRt） | 现（LLM Engine） |
+|---|---|---|
+| 接口 | `LoadOfflineModel(buffer)` / `Run(inputIds, output)` | `LoadModel(contextJson, executorJson)` / `GenerateAsync(prompt, callbacks)` |
+| tokenizer | 自研 | 引擎内部（经 `executor.json` 的 `tokenizer.path/type`） |
+| prefill/decode | 自研 | 内置 |
+| KV cache | 自研 | 内置 |
+| 采样 | 自研 | `context.json` 的 `sampler` 配置 |
+| 指标 | 自研计时 | `Get*TimeMs` / `Get*TokenCount` |
+
+## 二、仓库结构
 
 ```text
-*.hllm
+harmony-llm-runtime/
+├── README.md
+├── AppScope/
+│   └── app.json5
+├── build-profile.json5
+├── hvigorfile.ts
+├── oh-package.json5
+├── entry/
+│   ├── build-profile.json5
+│   ├── hvigorfile.ts
+│   ├── oh-package.json5
+│   └── src/main/
+│       ├── module.json5
+│       ├── cpp/
+│       │   ├── CMakeLists.txt              # 链接 libhiai_llm_engine.so 与 native 源码
+│       │   ├── LLMEngineModule.cpp         # NAPI 桥（loadmodel/modelinfer/answerget/deinitmodel）
+│       │   └── types/libentry/
+│       │       ├── Index.d.ts              # ArkTS 侧类型声明
+│       │       └── oh-package.json5
+│       ├── ets/
+│       │   ├── entryability/EntryAbility.ets
+│       │   └── pages/Index.ets             # Chat UI + 模型加载
+│       └── resources/base/
+│           ├── element/string.json
+│           ├── element/color.json
+│           └── profile/main_pages.json
+└── native/
+    ├── runtime/
+    │   ├── InferenceBackend.h              # 抽象推理接口（LLM Engine 生命周期）
+    │   └── LLMEngineApi.h                  # LLM Engine C-API 契约
+    ├── backends/cann/
+    │   └── CannBackend.cpp                 # LLM Engine 实现
+    └── model_package/
+        ├── Manifest.h
+        ├── EngineConfig.h                  # context.json / executor.json 类型
+        ├── PackageReader.h / .cpp          # .hllm 校验 / 定位引擎文件
+        ├── Json.h / .cpp                   # 轻量 JSON 解析
+        └── Sha256.h / .cpp                 # 完整性校验用 SHA-256
 ```
 
-不建议直接把以下文件交给 Runtime：
+## 三、模型包（.hllm）
+
+Runtime 消费的 `.hllm` 取自 Ubuntu Converter，内部按 CANN LLM Engine 需要的文件集组织：
 
 ```text
-*.safetensors
-*.onnx
-*.om
-*.omc
-*.bin
+model.hllm
+├── manifest.json
+├── model/
+│   ├── <model>.omc
+│   ├── SubGraph_0.weight
+│   ├── <model>_<len>_<ctx>.embedding_weights
+│   └── <model>_<len>_<ctx>.embedding_dequant_scale
+└── config/
+    ├── context.json      # Engine 生成/采样配置
+    ├── executor.json     # .omc / 权重目录 / tokenizer 描述
+    └── tokenizer.json
 ```
 
-这些底层文件应先由 Ubuntu Converter 整理成符合 HLLM Package Contract 的 `.hllm`。
+`manifest.json` 的 `artifacts[]` 逐条声明 path + sha256 + size；`target.backend` 记为 `cann_llm_engine`；`runtime.llm_engine` 携带 `engine_type`、`kv_cache_max_len`、`prefill_len`、`max_io_tokens`、`vocab_size`、`hidden_size`、`num_hidden_layers`、注意力头数/维度、`max_position_embeddings`、`embedding_input_type` 等，供设备兼容性判断使用。
 
-## 三、导入模型
+## 四、原生推理层
 
-### 本地文件导入
+### `native/runtime/LLMEngineApi.h`
 
-典型流程：
+声明 LLM Engine 的 C-API（opaque 句柄 + 函数），与官方示例 `llm_demo.cpp` 的调用一致。真机构建时，该文件需与所装 CANN Kit 的 DDK 头文件保持一致（或直接替换为真实头文件）。
 
-```text
-模型中心
- → 导入模型
- → 选择 .hllm
- → 校验
- → 安装
+### `native/runtime/InferenceBackend.h`
+
+抽象推理接口：
+
+```cpp
+struct DeviceProfile { osVersion; chip; runtimeVersion; availableMemoryBytes; };
+struct GenerationMetrics { totalTimeMs; prefillTimeMs; decodeTimeMs; inputTokenCount; outputTokenCount; decodeNum; };
+struct GenerationCallbacks { onToken; onDone; onError; };
+
+class InferenceBackend {
+    virtual bool IsCompatible(device, targetChip, requiredRuntime) const = 0;
+    virtual bool LoadModel(contextJson, executorJson) = 0;
+    virtual bool Generate(prompt, outText) = 0;
+    virtual bool GenerateAsync(prompt, callbacks) = 0;
+    virtual bool Cancel() = 0;
+    virtual bool GetAllGeneration(outText) const = 0;
+    virtual bool GetMetrics(out) const = 0;
+    virtual void Unload() = 0;
+};
 ```
 
-导入时不得直接覆盖正在使用的模型。
+### `native/backends/cann/CannBackend.cpp`
 
-推荐安装流程：
+实现上述接口，直接调用 `LLMEngineApi.h`。引擎回调只携带 `const LLMEngine_Context*`，因此用一个小的全局注册表把 context 指回所属 backend，从而把 `onToken/onDone/onError` 转发到 UI。
+
+### `native/model_package/`
+
+`PackageReader` 在解包后校验：
 
 ```text
-Temporary Import
-      ↓
-Integrity Check
-      ↓
-Compatibility Check
-      ↓
-Atomic Install
-      ↓
+manifest.json 可解析
+schema_version == 1.0
+每个 artifact 路径不越界（无绝对路径 / ..）
+每个 artifact 存在 + SHA-256 匹配
+定位 .omc / SubGraph_0.weight 目录 / embedding / context.json / executor.json / tokenizer.json
+```
+
+`Json.h/.cpp` 与 `Sha256.h/.cpp` 为无依赖实现；真机可用平台 JSON / 密码学库替换而不影响调用方。
+
+## 五、NAPI 桥（entry/src/main/cpp/LLMEngineModule.cpp）
+
+ArkTS 通过 `libentry.so` 调用：
+
+```ts
+llmEngine.loadmodel(contextJsonPath, executorJsonPath): string   // 加载 .omc 并返回状态
+llmEngine.modelinfer(question): void                              // 异步生成
+llmEngine.answerget((token: string) => void): void                // 注册流式回调
+llmEngine.deinitmodel(): void                                     // 释放引擎
+```
+
+流式 token 通过 `napi_threadsafe_function` 从引擎工作线程安全回到 JS 主线程。
+
+## 六、接入 CANN Kit（真机）
+
+参考官方 DemoNext，在 `entry/src/main/cpp` 下准备：
+
+```text
+cpp/
+├── include/
+│   ├── lm_engine_model_info.h
+│   ├── cann_llm_engine_context.h
+│   ├── cann_llm_engine_executor.h
+│   ├── llm_engine_c_api_export.h
+│   ├── llm_engine_context_base.h
+│   ├── llm_engine_executor_base.h
+│   └── llm_engine_return_types.h
+└── lib64/
+    └── libhiai_llm_engine.so
+```
+
+`entry/build-profile.json5` 的 `externalNativeOptions.path` 已指向 `./src/main/cpp/CMakeLists.txt`；`CMakeLists.txt` 已把 `include/` 加入头文件路径并链接 `libhiai_llm_engine.so`。
+
+## 七、模型导入流程（运行时机）
+
+```text
+选择 .hllm
+    ↓
+临时解包到 /tmp/import
+    ↓
+PackageReader：manifest / SHA-256 / 路径校验
+    ↓
+设备兼容性检查（DeviceProfile × model requirements）
+    ↓
+原子安装（model-v1 → model-v2.tmp → validate → switch）
+    ↓
+loadmodel(context.json, executor.json)
+    ↓
 READY
 ```
 
-### 从 Ubuntu 传输
-
-后续支持局域网模式：
+启动会话后：
 
 ```text
-Ubuntu Converter
-       │
-       │ LAN
-       ▼
-HarmonyOS Runtime
+用户输入
+    ↓ 应用 chat template（字符串层）
+    ↓ LLMEngine_Prompt_SetText
+    ↓ LLMEngine_Executor_LLM_GenerateAsync
+    ↓ LLM Engine 内部：分词 → prefill → decode → 采样 → 解码
+    ↓ onSomeToken 回调 → NAPI → ArkTS 流式展示
 ```
 
-Ubuntu 负责提供已完成的 `.hllm`；HarmonyOS 只下载该文件并执行与本地导入相同的校验流程。
+## 八、设备兼容性
 
-## 四、安装前检查
-
-Runtime 必须按顺序执行：
+最终能否运行由以下因素共同决定：
 
 ```text
-1. 文件存在
-2. HLLM archive 可读取
-3. manifest.json 可解析
-4. schema_version 支持
-5. artifact 存在
-6. SHA-256 正确
-7. tokenizer 资源完整
-8. target chip 匹配
-9. Runtime/CANN 版本匹配
-10. NPU / memory / storage 资源满足要求
+模型包（.omc / 精度 / 词表）
+      ×  目标芯片
+      ×  CANN / LLM Engine 版本
+      ×  NPU 内存（kv_cache_max_len、max_io_tokens、prefill_len、max_position_embeddings）
+      ×  operator 支持
+      ↓
+COMPATIBLE / COMPATIBLE_WITH_LIMITS / INCOMPATIBLE
 ```
 
-任何一步失败，模型不能进入 `READY`。
+## 九、构建
 
-## 五、模型状态
+```bash
+# 在 DevEco Studio（Windows / Mac）打开 harmony-llm-runtime 并同步构建
+# 或者，在已配置 SDK 的环境：
+devecocli build --modules entry --build-mode debug
+```
+
+> devecocli 在本机为 `1.2.0-stable`，但其 DevEco Studio / SDK 自动检测目前在 **Linux 不支持**，真机构建/运行需在 DevEco Studio 或已正确配置 SDK 的进程中执行。
+
+## 十、模型管理 / 状态机 / 安全
+
+模型中心至少显示：名称、家族、量化、包大小、目标芯片、运行时版本、上下文长度、兼容性、状态。
 
 推荐状态机：
 
 ```text
-IMPORTED
-   ↓
-VALIDATING
-   ↓
-INSTALLED
-   ↓
-READY
-   ↓
-RUNNING
-   ↓
-READY
+IMPORTED → VALIDATING → INSTALLED → READY → RUNNING → READY
+异常：ERROR / INCOMPATIBLE
 ```
 
-异常状态：
-
-```text
-ERROR
-INCOMPATIBLE
-```
-
-模型升级建议采用双目录或临时目录：
-
-```text
-model-v1
-model-v2.tmp
-    ↓
-validate
-    ↓
-atomic switch
-    ↓
-model-v2
-```
-
-这样新模型失败时不会破坏旧模型。
-
-## 六、设备能力检测
-
-安装和启动前都应获取 `DeviceProfile`：
-
-```text
-DeviceProfile
-├── HarmonyOS version
-├── device model
-├── chip
-├── NPU availability
-├── RAM
-├── storage
-├── runtime/CANN version
-└── supported offline model formats
-```
-
-模型包则提供 `ModelRequirements`：
-
-```text
-ModelRequirements
-├── backend
-├── target chip
-├── runtime version
-├── minimum memory
-├── context length
-└── artifact format
-```
-
-最终结果：
-
-```text
-COMPATIBLE
-COMPATIBLE_WITH_LIMITS
-INCOMPATIBLE
-```
-
-错误必须说明原因，例如：
-
-```text
-目标芯片不匹配
-CANN Runtime 版本过低
-NPU 内存不足
-上下文长度超出当前设备建议值
-不支持所需 artifact format
-```
-
-## 七、Qwen3.8-27B 运行注意事项
-
-Qwen3.8-27B 是本项目当前核心目标，但它是大模型/多模态模型。
-
-第一阶段应将能力明确拆成：
-
-```text
-Text LLM
-  └── 第一优先级
-
-Vision
-  └── 后续独立验证
-
-Video
-  └── 后续独立验证
-```
-
-因此：
-
-> Runtime 能够运行 Qwen3.8-27B 的文本路径，不等于视觉和视频输入路径已经支持。
-
-另外，是否可以运行 27B 不由“27B”这个数字单独决定，而取决于：
-
-```text
-target chip
-NPU memory
-runtime version
-quantization
-context length
-operator support
-```
-
-## 八、Tokenizer 与 Chat Template
-
-Tokenizer 是 Runtime 的核心组件，不可以只依赖默认规则。
-
-模型包应提供：
-
-```text
-tokenizer.json / tokenizer.model
-tokenizer_config.json
-special tokens
-chat template
-model config
-```
-
-完整链路：
-
-```text
-User Message
-      ↓
-Conversation State
-      ↓
-Chat Template
-      ↓
-Tokenizer
-      ↓
-Input IDs
-      ↓
-Native Runtime
-      ↓
-CANN / NPU
-      ↓
-Token IDs
-      ↓
-Tokenizer Decode
-      ↓
-Streaming Text
-```
-
-每个模型的 Chat Template 都可能不同，因此 Runtime 不能硬编码 Qwen prompt 给所有模型共用。
-
-## 九、推理 API
-
-Native Runtime 建议提供稳定接口：
-
-```text
-loadModel(modelId)
-unloadModel(modelId)
-createSession(modelId)
-appendMessage(sessionId, role, content)
-generate(sessionId, options)
-cancel(sessionId)
-reset(sessionId)
-```
-
-生成参数至少支持：
-
-```text
-temperature
-top_p
-max_tokens
-stop sequences
-context length
-```
-
-UI 与 Native Runtime 通过异步事件流通信：
-
-```text
-GENERATE_STARTED
-TOKEN
-TOKEN
-TOKEN
-GENERATE_COMPLETED
-```
-
-错误事件：
-
-```text
-MODEL_LOAD_FAILED
-OUT_OF_MEMORY
-UNSUPPORTED_OPERATOR
-RUNTIME_ERROR
-CANCELLED
-```
-
-## 十、HarmonyOS 工程边界
-
-推荐：
-
-```text
-ArkUI / ArkTS
-     ↓
-Application Services
-     ↓
-NAPI / Native Bridge
-     ↓
-C++ Runtime
-     ↓
-CANN / NNRt Backend
-     ↓
-NPU
-```
-
-ArkTS 负责：
-
-- 页面
-- 模型列表
-- 导入
-- 安装进度
-- Chat UI
-- 设置
-- 错误展示
-
-C++/Native 负责：
-
-- HLLM package access
-- tokenizer bridge
-- model loader
-- tensor/session management
-- generation
-- KV cache
-- CANN/NNRt calls
-
-不要把模型转换逻辑放进 ArkTS。
-
-## 十一、模型管理
-
-模型中心至少显示：
-
-```text
-Model Name
-Model Family
-Quantization
-Package Size
-Target Chip
-Runtime Version
-Context Length
-Compatibility
-Status
-```
-
-操作：
-
-```text
-导入
-验证
-安装
-启动
-停止
-删除
-升级
-重新验证
-```
-
-## 十二、存储管理
-
-模型文件可能非常大，因此安装流程必须使用临时空间和原子切换：
-
-```text
-.hllm
- ↓
-/tmp/import/model.hllm
- ↓
-verify
- ↓
-extract
- ↓
-verify artifacts
- ↓
-install
- ↓
-READY
-```
-
-必须检查：
-
-- package size
-- extracted size
-- free space
-- temporary space
-
-删除模型时确认模型没有处于 `RUNNING`。
-
-## 十三、完整性和安全
-
-Runtime 必须验证：
-
-```text
-manifest.json
-schema version
-artifact presence
-SHA-256
-```
-
-后续增加数字签名：
-
-```text
-.hllm
- ↓
-Signature Verify
- ↓
-Trusted Publisher
- ↓
-Install
-```
-
-绝不因为模型包中存在某个脚本文件而自动执行该脚本。
-
-## 十四、常见导入问题
-
-### `PACKAGE_INVALID`
-
-通常检查：
-
-```text
-.hllm 是否完整
-manifest.json 是否存在
-ZIP 是否损坏
-```
-
-### `CHECKSUM_FAILED`
-
-模型传输过程中被改变或包生成时的 artifact 已经不同。
-
-重新从 Converter 复制 `.hllm`，不要手工替换包内文件。
-
-### `DEVICE_UNSUPPORTED`
-
-检查：
-
-```text
-manifest.target.chip
-DeviceProfile.chip
-```
-
-### `CANN_VERSION_UNSUPPORTED`
-
-模型是在特定版本 CANN 环境转换的，Runtime 的离线模型兼容条件可能不同。应使用目标设备对应的 target profile 重新转换。
-
-### `INSUFFICIENT_MEMORY`
-
-可尝试：
-
-```text
-更小模型
-更低 context length
-更合适的量化 profile
-```
-
-但不能仅靠减少 UI 配置绕过模型本身的 NPU 内存需求。
-
-## 十五、模型启动
-
-推荐模型启动流程：
-
-```text
-Select Model
-    ↓
-Re-check Compatibility
-    ↓
-Load Tokenizer
-    ↓
-Load Offline Model
-    ↓
-Create Session
-    ↓
-READY
-```
-
-真正开始生成时：
-
-```text
-Prompt
- ↓
-Tokenize
- ↓
-Runtime Execute
- ↓
-NPU
- ↓
-Decode
- ↓
-UI Stream
-```
-
-## 十六、性能与 Benchmark
-
-Runtime 应记录：
-
-```text
-first token latency
-prompt tokens/sec
-generation tokens/sec
-peak memory
-context length
-load time
-model size
-```
-
-不要只记录“聊天是否成功”。
-
-后续可以对同一个 `.hllm` 在不同 HarmonyOS 设备上建立 benchmark 表。
-
-## 十七、开发与测试
-
-HarmonyOS Runtime 开发时至少建立：
-
-```text
-Package Parser Test
-Manifest Test
-Checksum Test
-Compatibility Test
-Model Manager Test
-Tokenizer Test
-Native Backend Test
-Inference Test
-```
-
-其中 Native/CANN 真机测试不能由模拟器结果代替。真实 NPU 兼容性必须使用对应设备验证。
-
-## 十八、当前项目边界
-
-### Runtime 做
-
-```text
-.hllm
- ↓
-Verify
- ↓
-Install
- ↓
-Tokenizer
- ↓
-Native Runtime
- ↓
-CANN / NNRt / NPU
-```
-
-### Runtime 不做
-
-```text
-Hugging Face
- ↓
-Transformers
- ↓
-Quantization
- ↓
-ONNX Export
- ↓
-CANN Convert
-```
-
-这些全部由 Ubuntu Converter 完成。
-
-## 十九、推荐用户操作手册
-
-普通用户：
-
-```text
-1. 获取一个 .hllm
-2. 打开 HarmonyOS LLM Runtime
-3. 进入“模型中心”
-4. 点击“导入模型”
-5. 选择 .hllm
-6. 等待完整性检查和兼容性检查
-7. 安装
-8. 打开模型
-9. 新建会话
-10. 开始本地对话
-```
-
-开发者：
-
-```text
-1. 在 Ubuntu 部署 Converter
-2. 下载 Hugging Face 模型
-3. inspect 模型
-4. 使用已验证 target profile
-5. 执行 INT4 / ONNX / CANN 转换
-6. validate
-7. 生成 .hllm
-8. 传到 HarmonyOS 真机
-9. 导入
-10. 做设备兼容性与推理 benchmark
-```
-
-## 二十、Compatibility Contract
-
-本项目与 Ubuntu Converter 的唯一核心耦合点是：
-
-> **HLLM Package Contract**
-
-Converter 可以持续更换量化、ONNX、CANN 转换实现；Runtime 可以持续更换 UI 和内部运行时实现，只要双方遵守同一模型包规范，就可以独立演进。
-
-## 相关文档
+安全原则：
+
+- `.hllm` 是数据，不是可执行代码。
+- 拒绝路径穿越、绝对路径、重复 manifest 条目、未声明可执行内容。
+- 绝不因为包内存在某个脚本文件而自动执行它。
+- SHA-256 校验通过前不得安装。
+- 删除模型前确认没有处于 `RUNNING`。
+
+## 十一、相关文档
 
 - `../README.md`
 - `../docs/hllm-package-spec.md`
-- `../docs/hllm-manifest.schema.json`
+- `../docs/optimization-against-cann-llm-guide.md`（对照官方解决方案的优化与简化分析）
