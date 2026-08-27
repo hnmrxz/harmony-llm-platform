@@ -21,7 +21,7 @@ def _minimal_model(path: Path, opset: int = 11) -> None:
 def test_audit_static_opset11(tmp_path: Path) -> None:
     path = tmp_path / "model.onnx"
     _minimal_model(path)
-    report = audit_onnx(path, expected_opset=11, expected_ir=path and None, require_static=True)
+    report = audit_onnx(path, expected_opset=11, require_static=True)
     assert report["ok"]
     assert report["opset"] == 11
     assert report["dynamic_inputs"] == []
