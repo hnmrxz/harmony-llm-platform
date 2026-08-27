@@ -141,6 +141,8 @@ OMG/OMC
 
 `generic` ONNX 模式仍保留用于通用兼容性诊断，但不作为 Kirin OMC production path。
 
+`cann_static` 生成的图接口为 `input_ids` + `position_ids`：mask 相关计算以静态因果矩阵形式折叠进图中（详见第 9 节），`attention_mask` 不再作为 graph 输入暴露。
+
 ### External Data 规则
 
 大模型权重可能必须使用 ONNX external data。项目不会对“未加载到内存中的 external tensor”执行二次 `onnx.save()`、`onnxsim` 重写或伪造 placeholder 文件；这样可以避免：
@@ -218,6 +220,30 @@ omg
 在 OMG 前检查：ONNX checker、opset、IR version、静态输入、external-data location、external-data 文件存在性、node/initializer/input/output inventory。
 
 不满足 profile 的模型会在进入 OMG 前失败并报告 `ONNX_PREFLIGHT_FAILED`。
+
+### KirinX90 OMG 兼容性改写
+
+DDK 6.0.x 的 `libai_fmk_onnx_parser.so` 无法消费若干 torch 导出习语，均已在
+KirinX90 DDK 上实证（最小复现 + 全量端到端验证）：
+
+| torch 导出模式 | DDK 表现 |
+| --- | --- |
+| `ConstantOfShape`（Constant 供形） | 解析阶段 `UpdateUserSetNodeNames` 直接中止（与节点命名无关） |
+| Gather 使用 INT64 索引 | GE `GatherV2D` Verify 拒收 |
+| `Unsqueeze` / `Expand` | NPU 前端缺 `ExpandDims` / `BroadcastTo` kernel，compatibility check 判死 |
+
+`hllm.backends.kirin_compat.make_kirin_omg_compatible()` 在每次 OMG 命令生成前做三段值等价改写：
+
+1. **静态 feed 折叠**：对 `attention_mask`（cann_static 下恒为全 1）可达的常量锥用 NumPy 求值，
+   物化为 initializer；该输入若再无消费者则从 graph 输入中移除——动态 mask 机制整体消失。
+   因此 `cann_static` 的 omc 输出语义等价于"无 padding 的固定长度 prefill"，
+   这正是该 profile 声明的冒烟测试范围。
+2. **Gather 索引 INT32 化**：每个被 Gather 消费的 INT64 索引张量插入一次边界 Cast；
+   其他消费者继续使用原 INT64 张量。
+3. **Unsqueeze→Reshape、Expand→Mul(ones)**：形状全部来自 shape inference 的静态维度。
+
+三条 pass 只重写 ModelProto 元数据：外部权重文件从不加载、从不改写；改写后执行悬空引用校验
+（失败抛 `KirinCompatError`，拒绝产出损坏模型）。
 
 ## 11. FP8
 

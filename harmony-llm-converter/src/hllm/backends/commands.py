@@ -42,15 +42,27 @@ def run_command(
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
-    completed = subprocess.run(
-        args,
-        cwd=str(cwd) if cwd else None,
-        env=merged_env,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            args,
+            cwd=str(cwd) if cwd else None,
+            env=merged_env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        # Missing toolchain binaries must surface as structured failures (the
+        # build pipeline reports EXTERNAL_COMMAND_FAILED with the argv), not as
+        # raw tracebacks escaping the CLI.
+        raise ExternalCommandError(
+            CommandResult(args, 127, "", f"{args[0]}: command not found ({exc})")
+        ) from None
+    except subprocess.TimeoutExpired:
+        raise ExternalCommandError(
+            CommandResult(args, 124, "", f"{args[0]}: timed out after {timeout}s")
+        ) from None
     result = CommandResult(args, completed.returncode, completed.stdout, completed.stderr)
     if result.returncode != 0:
         raise ExternalCommandError(result)

@@ -63,10 +63,19 @@ def test_build_omg_command_normalizes_model_before_command(tmp_path: Path, monke
         "normalize_onnx_node_names",
         lambda path: calls.append(("names", path)) or {"changed": 0},
     )
+    monkeypatch.setattr(
+        omg,
+        "make_kirin_omg_compatible",
+        lambda path: calls.append(("kirin", path)) or {"fold": {}, "gather": {}, "unsqueeze_expand": {}},
+    )
 
     command = build_omg_command(_profile(), model=model, output=tmp_path / "out" / "model")
 
-    assert calls == [("external", model.resolve()), ("names", model.resolve())]
+    assert calls == [
+        ("external", model.resolve()),
+        ("names", model.resolve()),
+        ("kirin", model.resolve()),
+    ]
     assert command[0] == "omg"
     assert "--framework=5" in command
     assert "--target=omc" in command
