@@ -27,6 +27,9 @@ class BuildProfile:
     export_command: tuple[str, ...] = ()
     quantization_commands: tuple[tuple[str, ...], ...] = ()
     capabilities: tuple[tuple[str, bool], ...] = ()
+    conversion_tool: str = "omg"
+    framework: int = 5
+    cann_target: str = "omc"
 
     @property
     def supports_fp8_input(self) -> bool:
@@ -113,6 +116,9 @@ def load_profile(path: str | Path) -> BuildProfile:
         export_command=tuple(map(str, export.get("command", []))),
         quantization_commands=tuple(tuple(map(str, cmd)) for cmd in quant.get("commands", [])),
         capabilities=tuple((str(k), bool(v)) for k, v in capabilities.items()),
+        conversion_tool=str(cann.get("conversion_tool", "omg")),
+        framework=int(cann.get("framework", 5)),
+        cann_target=str(cann.get("target", "omc")),
     )
 
 
