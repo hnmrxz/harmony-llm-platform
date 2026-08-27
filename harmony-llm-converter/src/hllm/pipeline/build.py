@@ -94,8 +94,10 @@ def _export_onnx_if_needed(source: Path, work_dir: Path, profile: BuildProfile, 
             logger(f"onnx_source=stale reason={report['errors']}")
         export_dir.mkdir(parents=True, exist_ok=True)
         for stale in export_dir.iterdir():
-            if stale.is_file():
+            if stale.is_file() or stale.is_symlink():
                 stale.unlink()
+            elif stale.is_dir():
+                shutil.rmtree(stale)
     elif existing:
         logger(f"onnx_source=existing path={existing[0]}")
         return existing[0]
@@ -115,6 +117,20 @@ def _export_onnx_if_needed(source: Path, work_dir: Path, profile: BuildProfile, 
         )
     except Exception as exc:
         raise RuntimeError(f"ONNX_EXPORT_FAILED: {exc}") from exc
+
+
+def _prepare_final_dir(work_dir: Path) -> Path:
+    """Return a clean vendor-output directory for an idempotent conversion."""
+    final_dir = work_dir / "final"
+    if final_dir.exists() and not final_dir.is_dir():
+        final_dir.unlink()
+    final_dir.mkdir(parents=True, exist_ok=True)
+    for entry in final_dir.iterdir():
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+    return final_dir
 
 
 def build(request: BuildRequest) -> dict:
@@ -211,16 +227,15 @@ def build(request: BuildRequest) -> dict:
         )
 
         runner.enter(Stage.CANN_CONVERT)
+        final_dir = _prepare_final_dir(runner.work_dir)
         cann_commands = profile.cann_commands
         if not cann_commands and profile.conversion_tool == "omg":
-            final_dir = runner.work_dir / "final"
-            final_dir.mkdir(parents=True, exist_ok=True)
             generated = build_omg_command(profile, model=onnx_path, output=final_dir / "model")
             cann_commands = (generated,)
         if not cann_commands:
             raise RuntimeError("no CANN conversion command configured")
         executor.run(cann_commands)
-        model_files = assemble_artifacts(source, runner.work_dir / "final")
+        model_files = assemble_artifacts(source, final_dir)
         if not model_files:
             raise RuntimeError("no final artifacts found under work/final; target profile must create a deployable artifact")
 
