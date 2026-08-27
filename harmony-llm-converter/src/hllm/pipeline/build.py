@@ -8,6 +8,7 @@ from pathlib import Path
 
 from hllm.backends.commands import ExternalCommandError
 from hllm.backends.omg import build_omg_command
+from hllm.backends.onnx import export_qwen_onnx
 from hllm.config import BuildProfile, load_profile
 from hllm.download.huggingface import download_model
 from hllm.models.adapters import default_registry
@@ -86,6 +87,20 @@ def _validate_request_against_profile(profile: BuildProfile, request: BuildReque
         raise ValueError(f"profile model.source '{configured}' does not match requested model '{request.source}'")
 
 
+def _export_onnx_if_needed(source: Path, work_dir: Path, profile: BuildProfile, adapter_family: str, logger) -> Path:
+    existing = sorted(work_dir.rglob("*.onnx"))
+    if existing:
+        logger(f"onnx_source=existing path={existing[0]}")
+        return existing[0]
+    if profile.export_command:
+        raise RuntimeError("profile export.command did not create an ONNX artifact")
+    if adapter_family != "qwen":
+        raise RuntimeError("automatic ONNX export is currently implemented only for Qwen")
+    output = work_dir / "export" / "model.onnx"
+    logger(f"onnx_export=automatic path={output}")
+    return export_qwen_onnx(source, output)
+
+
 def build(request: BuildRequest) -> dict:
     profile = load_profile(request.profile) if request.profile else _default_profile(request)
     _validate_request_against_profile(profile, request)
@@ -150,28 +165,30 @@ def build(request: BuildRequest) -> dict:
             runner.enter(Stage.QUANTIZE); executor.run(profile.quantization_commands)
         else:
             runner.state.record("skip=quantize reason=fp8_input")
+
         runner.enter(Stage.EXPORT)
         if profile.export_command:
             executor.run((profile.export_command,))
-        else:
-            runner.state.record("skip=export reason=no_profile_command")
+        onnx_path = _export_onnx_if_needed(source, runner.work_dir, profile, match.family, runner.state.record)
+
         runner.enter(Stage.CANN_CONVERT)
         cann_commands = profile.cann_commands
         if not cann_commands and profile.conversion_tool == "omg":
-            onnx_candidates = sorted(runner.work_dir.rglob("*.onnx"))
-            if not onnx_candidates:
-                raise RuntimeError("no ONNX artifact found for OMG conversion")
-            generated = build_omg_command(profile, model=onnx_candidates[0], output=runner.work_dir / "final" / "model")
+            generated = build_omg_command(profile, model=onnx_path, output=runner.work_dir / "final" / "model")
             cann_commands = (generated,)
+        if not cann_commands:
+            raise RuntimeError("no CANN conversion command configured")
         executor.run(cann_commands)
         model_files = assemble_artifacts(source, runner.work_dir / "final")
         if not model_files:
             raise RuntimeError("no final artifacts found under work/final; target profile must create a deployable artifact")
+
         runner.enter(Stage.VALIDATE)
         manifest = Manifest(schema_version="1.0",
             model=ModelInfo(name=metadata.name, family=match.family, architecture=metadata.architecture or "unknown",
                             source_type="huggingface" if source_id else "local", source_id=source_id or str(source)),
-            quantization=QuantizationInfo(type="fp8" if metadata.is_fp8 else profile.quantization, bits=8 if metadata.is_fp8 else profile.bits),
+            quantization=QuantizationInfo(type="fp8" if metadata.is_fp8 else profile.quantization,
+                                          bits=8 if metadata.is_fp8 else profile.bits),
             target=TargetInfo(backend="cann", chip=profile.target_chip, runtime_version=profile.runtime_version),
             runtime=RuntimeInfo(context_length=profile.context_length),
             build=BuildInfo(converter_version="0.1.0", python_version=sys.version.split()[0]))
