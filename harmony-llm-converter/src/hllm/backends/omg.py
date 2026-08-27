@@ -6,6 +6,22 @@ from pathlib import Path
 from hllm.config import BuildProfile
 
 
+def prepare_omg_output(output: Path) -> Path:
+    """Prepare an OMG output path for DDK versions that require realpath().
+
+    Some OMG/GraphEngine builds validate the complete output path with
+    ``realpath`` before conversion and therefore reject a not-yet-existing
+    output prefix. Create a zero-length placeholder so the path is resolvable;
+    OMG will replace/generate the actual offline model at the same prefix.
+    """
+    output = output.expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.exists() and output.is_dir():
+        raise ValueError(f"OMG output must be a file prefix, not a directory: {output}")
+    output.touch(exist_ok=True)
+    return output
+
+
 def build_omg_command(profile: BuildProfile, *, model: Path, output: Path) -> tuple[str, ...]:
     if profile.conversion_tool != "omg":
         raise ValueError(f"OMG command requested for conversion tool '{profile.conversion_tool}'")
@@ -17,8 +33,7 @@ def build_omg_command(profile: BuildProfile, *, model: Path, output: Path) -> tu
     if not platform:
         raise ValueError("Kirin OMC profile requires cann.platform (for example: kirinx90)")
     model_path = model.expanduser().resolve()
-    output_path = output.expanduser().resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = prepare_omg_output(output)
     return (
         "omg",
         f"--model={model_path}",
