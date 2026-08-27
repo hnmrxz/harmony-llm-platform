@@ -16,6 +16,7 @@ class BuildProfile:
     preferred_path: str | None
     fallback_path: str | None
     target_chip: str
+    platform: str | None
     runtime_version: str | None
     quantization: str
     bits: int
@@ -99,6 +100,7 @@ def load_profile(path: str | Path) -> BuildProfile:
     capabilities = runtime.get("capabilities", {})
     if not isinstance(capabilities, dict):
         raise ValueError("runtime.capabilities must be an object")
+    platform = str(cann.get("platform")).strip() if cann.get("platform") else None
     return BuildProfile(
         model_source=source,
         model_family=str(model.get("family")) if model.get("family") else None,
@@ -106,6 +108,7 @@ def load_profile(path: str | Path) -> BuildProfile:
         preferred_path=str(pipeline.get("preferred_path")) if pipeline.get("preferred_path") else None,
         fallback_path=str(pipeline.get("fallback_path")) if pipeline.get("fallback_path") else None,
         target_chip=target_chip,
+        platform=platform,
         runtime_version=str(cann.get("runtime_version")) if cann.get("runtime_version") else None,
         quantization=str(quant.get("method", "cann_4bit")), bits=int(quant.get("bits", 4)),
         context_length=int(runtime["context_length"]) if runtime.get("context_length") else None,
