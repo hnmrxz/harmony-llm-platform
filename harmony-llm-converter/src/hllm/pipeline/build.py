@@ -53,6 +53,20 @@ def _is_repo_id(value: str) -> bool:
     return "/" in value and not Path(value).expanduser().exists()
 
 
+def _available_ram() -> int:
+    """Return available system RAM without making psutil a hard runtime import."""
+    try:
+        import psutil
+        return int(psutil.virtual_memory().available)
+    except ImportError:
+        meminfo = Path("/proc/meminfo")
+        if meminfo.is_file():
+            for line in meminfo.read_text(encoding="utf-8").splitlines():
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+        return 0
+
+
 def _resolve_source(request: BuildRequest) -> tuple[Path, str | None]:
     source = Path(request.source).expanduser()
     if source.is_dir():
@@ -81,9 +95,8 @@ def build(request: BuildRequest) -> dict:
         estimate = estimate_from_weights(inventory, bits=bits_for_plan)
         profile.output_dir.mkdir(parents=True, exist_ok=True)
         available_disk = shutil.disk_usage(profile.output_dir).free
-        import psutil
-        available_ram = psutil.virtual_memory().available
-        if estimate and not can_start(available_ram=available_ram, available_disk=available_disk, estimate=estimate):
+        available_ram = _available_ram()
+        if estimate and available_ram and not can_start(available_ram=available_ram, available_disk=available_disk, estimate=estimate):
             error = "INSUFFICIENT_DISK" if available_disk < estimate.recommended_disk_bytes else "INSUFFICIENT_RAM"
             return {"status": "failed", "stage": Stage.INSPECT.value, "error": error,
                     "required_ram_bytes": estimate.recommended_ram_bytes, "available_ram_bytes": available_ram,
@@ -101,8 +114,9 @@ def build(request: BuildRequest) -> dict:
         runner.state.record(f"available_disk={available_disk}")
 
         if request.dry_run:
-            stages = [Stage.DOWNLOAD, Stage.INSPECT]
-            if not (metadata.is_fp8 and profile.supports_fp8_input): stages.append(Stage.QUANTIZE)
+            stages = [Stage.DOWNLOAD, Stage.INSPECT, Stage.PLAN]
+            if not (metadata.is_fp8 and profile.supports_fp8_input):
+                stages.append(Stage.QUANTIZE)
             stages.extend([Stage.EXPORT, Stage.CANN_CONVERT, Stage.VALIDATE, Stage.PACKAGE])
             return {"status": "success", "dry_run": True, "model": metadata.name, "adapter": match.family,
                     "dtype": metadata.dtype, "inventory": asdict(inventory),
