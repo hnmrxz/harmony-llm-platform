@@ -68,7 +68,7 @@ if torch.cuda.is_available():
 PY
 ```
 
-WSL2 使用 Windows 主机 NVIDIA 驱动，不要在 WSL 内重复安装 Linux NVIDIA Driver。2GB MX450 只适合环境/小模型冒烟测试，不适合 Qwen3.8-27B 的生产量化。
+WSL2 使用 Windows 主机 NVIDIA 驱动，不要在 WSL 内重复安装 Linux NVIDIA Driver。2GB MX450 只适合 CUDA 环境和小模型冒烟测试，不适合作为 Qwen3.8-27B 的生产量化 GPU。
 
 ## 3. CANN / HarmonyOS DDK
 
@@ -104,7 +104,7 @@ configs/kirinx90-cann91-llm.example.yaml
 
 ## 5. Qwen3 CANN-oriented ONNX export
 
-默认 Qwen 自动导出不是简单的“任意 Transformers forward → 动态 ONNX”。针对 OMG/OMC 冒烟测试，使用：
+针对 OMG/OMC 冒烟测试，Qwen profile 使用静态输入和低版本 opset：
 
 ```yaml
 export:
@@ -130,26 +130,29 @@ eager attention
   ↓
 Torch ONNX export
   ↓
-onnxsim 静态图简化
+external-data 保持原始文件布局
   ↓
-统一 external-data
+ModelProto 元数据安全处理
   ↓
 ONNX preflight
   ↓
 OMG/OMC
 ```
 
-原始 `generic` ONNX 模式仍保留用于兼容性诊断，但不应作为 Kirin OMC production path。
+`generic` ONNX 模式仍保留用于通用兼容性诊断，但不作为 Kirin OMC production path。
 
-每次 build 都会生成：
+### External Data 规则
+
+大模型权重可能必须使用 ONNX external data。项目不会对“未加载到内存中的 external tensor”执行二次 `onnx.save()`、`onnxsim` 重写或伪造 placeholder 文件；这样可以避免：
 
 ```text
-work/export/model.onnx
-work/export/model.onnx.data（启用 external_data 时）
-work/export/onnx-audit.json
+ValidationError:
+Data of TensorProto ... should be stored in ... but it is not regular file
 ```
 
-如果工作目录里存在旧的、与 profile 不匹配的 ONNX，构建会自动判定为 stale 并重新导出，不会复用旧的 opset17/dynamic 图。
+同时避免为 27B 模型把几十 GB 权重一次性载入 RAM。
+
+`onnx-audit.json` 会检查每个 `external_data.location` 是否存在、是否越界到模型目录之外。
 
 ## 6. 下载模型
 
@@ -186,9 +189,7 @@ hllm build ./models/Qwen__Qwen3-0.6B \
   --dry-run
 ```
 
-dry-run 只验证 pipeline/resource/profile，不执行外部转换。
-
-真实构建：
+然后执行真实构建：
 
 ```bash
 hllm build ./models/Qwen__Qwen3-0.6B \
@@ -197,9 +198,11 @@ hllm build ./models/Qwen__Qwen3-0.6B \
   --output ./build/qwen3-0.6b
 ```
 
+构建会审计工作目录中的旧 ONNX；与 profile 的 opset、IR 或静态要求不一致时自动重新导出，不会继续使用旧动态模型。
+
 ## 9. OMG/OMC 调用
 
-当没有自定义 `cann.commands` 时，Kirin profile 会自动生成：
+未配置自定义 `cann.commands` 时自动生成：
 
 ```text
 omg
@@ -208,21 +211,13 @@ omg
   --platform=kirinx90
 ```
 
-输出路径使用绝对路径，父目录会在执行前创建。不要通过 `touch` 预创建 output 文件；OMG 应自行生成最终离线模型。
+输出目录提前创建，但最终模型文件必须由 OMG/OMC 实际生成。
 
 ## 10. ONNX preflight
 
-在 OMG 前自动检查：
+在 OMG 前检查：ONNX checker、opset、IR version、静态输入、external-data location、external-data 文件存在性、node/initializer/input/output inventory。
 
-- ONNX checker
-- opset
-- IR version
-- 静态输入 shape
-- external-data location
-- external-data 文件是否存在
-- node/initializer/input/output inventory
-
-不满足 profile 的模型会在进入 OMG 前失败并返回 `ONNX_PREFLIGHT_FAILED`，避免把确定不兼容的图交给厂商 parser。
+不满足 profile 的模型会在进入 OMG 前失败并报告 `ONNX_PREFLIGHT_FAILED`。
 
 ## 11. FP8
 
@@ -237,15 +232,9 @@ pipeline:
 
 不支持时返回 `UNSUPPORTED_FP8_TARGET`，不会静默转换成 BF16/FP16。
 
-目标模型：
-
-```text
-Qwen/Qwen3.8-27B-FP8
-```
-
 ## 12. INT4
 
-INT4 生产路径应使用 CANN-compatible LLM quantization backend，而不是把普通 Python 整数化逻辑写进主 Pipeline。需要量化的 profile 应显式提供 quantization workspace/commands。
+INT4 生产路径应使用 CANN-compatible LLM quantization backend，而不是把普通整数化逻辑写进主 Pipeline。
 
 ```text
 BF16/FP16
@@ -263,9 +252,9 @@ OMG/OMC
 
 ## 13. Prefill / Decode / KV Cache
 
-当前 `cann_static` 是 **Prefill-only smoke-test exporter**，目标是先验证 Qwen3 graph 能被当前 DDK/OMG/KirinX90 接受；它不是最终高性能 LLM runtime graph。
+当前 `cann_static` 是 **Prefill-only smoke-test exporter**，只用于验证当前 Qwen3 graph 与 DDK/OMG/KirinX90 的兼容性，不代表最终高性能 runtime graph。
 
-生产 LLM exporter 的下一阶段必须提供：
+生产 LLM exporter 后续必须提供：
 
 ```text
 Prefill graph
@@ -273,11 +262,11 @@ Decode graph
 KV cache inputs/outputs
 ```
 
-在此之前不会把“单一 full-forward logits ONNX”标记为 production-ready。
+在此之前不标记 production-ready。
 
 ## 14. 资源规划
 
-Build 前估算 source weights、quantized size、RAM、disk。真实 build 资源不足会返回 `INSUFFICIENT_RAM` / `INSUFFICIENT_DISK`；dry-run 只输出 warning，不阻断规划验证。
+Build 前估算 source weights、quantized size、RAM、disk。资源不足返回 `INSUFFICIENT_RAM` / `INSUFFICIENT_DISK`；dry-run 只输出 warning。
 
 ## 15. HLLM 打包与验证
 
@@ -285,7 +274,7 @@ Build 前估算 source weights、quantized size、RAM、disk。真实 build 资�
 hllm validate ./build/.../model.hllm
 ```
 
-验证 manifest、schema、artifact presence、SHA-256 和路径安全。大文件使用流式 SHA-256，不会一次性读入内存。
+验证 manifest、schema、artifact presence、SHA-256 和路径安全。大文件使用流式 SHA-256。
 
 ## 16. X90 Plus 真机确认
 
