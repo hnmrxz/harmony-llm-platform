@@ -1,8 +1,9 @@
 """ONNX export helpers for decoder-only Qwen models.
 
-The exporter is intentionally conservative: it exports a forward graph for
-logits with dynamic batch/sequence dimensions. Vendor-specific OMC conversion
-can then consume the resulting ONNX file.
+The exporter uses a conservative legacy Torch ONNX path because the converter
+supports Python environments whose PyTorch versions predate the newer exporter.
+Qwen is forced onto an eager-attention, FP32, no-cache graph to avoid complex
+intermediate values that the legacy exporter cannot lower reliably.
 """
 from __future__ import annotations
 
@@ -10,13 +11,7 @@ from pathlib import Path
 
 
 def export_qwen_onnx(model_dir: Path, output: Path, *, opset: int = 17) -> Path:
-    """Export a local Qwen causal-LM to ONNX.
-
-    ``optimum`` is not required. The implementation uses the Transformers model
-    and ``torch.onnx.export``. Large models should normally be exported on a
-    GPU-equipped conversion host; this function is primarily the generic
-    integration point used by the build pipeline.
-    """
+    """Export a local Qwen causal-LM to a deployable ONNX graph."""
     try:
         import torch
         from transformers import AutoModelForCausalLM
@@ -27,39 +22,75 @@ def export_qwen_onnx(model_dir: Path, output: Path, *, opset: int = 17) -> Path:
     output = output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_dir,
-        torch_dtype="auto",
-        low_cpu_mem_usage=True,
-    )
+    load_kwargs = {
+        "torch_dtype": torch.float32,
+        "low_cpu_mem_usage": True,
+    }
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_dir,
+            attn_implementation="eager",
+            **load_kwargs,
+        )
+    except TypeError:
+        # Compatibility with Transformers releases that do not expose
+        # attn_implementation on from_pretrained.
+        model = AutoModelForCausalLM.from_pretrained(model_dir, **load_kwargs)
+        if hasattr(model.config, "_attn_implementation"):
+            model.config._attn_implementation = "eager"
+    model = model.float()
     model.eval()
 
     device = next(model.parameters()).device
     input_ids = torch.ones((1, 4), dtype=torch.long, device=device)
     attention_mask = torch.ones_like(input_ids)
+    position_ids = torch.arange(4, device=device, dtype=torch.long).unsqueeze(0)
 
     class LogitsWrapper(torch.nn.Module):
         def __init__(self, wrapped: torch.nn.Module) -> None:
             super().__init__()
             self.wrapped = wrapped
 
-        def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-            return self.wrapped(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).logits
+        def forward(
+            self,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor,
+            position_ids: torch.Tensor,
+        ) -> torch.Tensor:
+            return self.wrapped(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                use_cache=False,
+                return_dict=False,
+            )[0]
 
     wrapper = LogitsWrapper(model)
-    with torch.no_grad():
-        torch.onnx.export(
-            wrapper,
-            (input_ids, attention_mask),
-            str(output),
-            input_names=["input_ids", "attention_mask"],
-            output_names=["logits"],
-            dynamic_axes={
-                "input_ids": {0: "batch", 1: "sequence"},
-                "attention_mask": {0: "batch", 1: "sequence"},
-                "logits": {0: "batch", 1: "sequence"},
-            },
-            opset_version=opset,
-            dynamo=False,
-        )
+    try:
+        with torch.no_grad():
+            torch.onnx.export(
+                wrapper,
+                (input_ids, attention_mask, position_ids),
+                str(output),
+                input_names=["input_ids", "attention_mask", "position_ids"],
+                output_names=["logits"],
+                dynamic_axes={
+                    "input_ids": {0: "batch", 1: "sequence"},
+                    "attention_mask": {0: "batch", 1: "sequence"},
+                    "position_ids": {0: "batch", 1: "sequence"},
+                    "logits": {0: "batch", 1: "sequence"},
+                },
+                opset_version=opset,
+                dynamo=False,
+            )
+    except RuntimeError as exc:
+        message = str(exc)
+        if "ComplexDouble" in message or "complex" in message.lower():
+            raise RuntimeError(
+                "ONNX_EXPORT_UNSUPPORTED: legacy Torch ONNX exporter encountered "
+                "a complex tensor in the Qwen graph even with eager/FP32/no-cache "
+                "export. Upgrade the export backend or use a validated pre-converted "
+                "ONNX model for this Transformers/PyTorch combination."
+            ) from exc
+        raise
     return output
