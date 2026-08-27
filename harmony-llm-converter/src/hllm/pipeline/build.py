@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -120,7 +121,6 @@ def _export_onnx_if_needed(source: Path, work_dir: Path, profile: BuildProfile, 
 
 
 def _prepare_final_dir(work_dir: Path) -> Path:
-    """Return a clean vendor-output directory for an idempotent conversion."""
     final_dir = work_dir / "final"
     if final_dir.exists() and not final_dir.is_dir():
         final_dir.unlink()
@@ -131,6 +131,32 @@ def _prepare_final_dir(work_dir: Path) -> Path:
         else:
             entry.unlink()
     return final_dir
+
+
+def _run_cann_conversion(profile: BuildProfile, onnx_path: Path, runner: PipelineRunner,
+                         executor: StageExecutor) -> None:
+    final_dir = _prepare_final_dir(runner.work_dir)
+    # DDK releases can reject otherwise-valid long output paths under /opt.
+    # A short /tmp staging path is known to pass the same validator; conversion
+    # artifacts are copied back only after OMG/OMC exits successfully.
+    staging = Path(tempfile.mkdtemp(prefix="hllm-omg-", dir="/tmp"))
+    try:
+        if profile.cann_commands:
+            commands = profile.cann_commands
+        elif profile.conversion_tool == "omg":
+            commands = (build_omg_command(profile, model=onnx_path, output=staging / "model"),)
+        else:
+            raise RuntimeError("no CANN conversion command configured")
+        executor.run(commands)
+        produced = [p for p in staging.rglob("*") if p.is_file()]
+        if not produced:
+            raise RuntimeError("OMG completed but produced no deployable files in staging directory")
+        for src in produced:
+            dst = final_dir / src.relative_to(staging)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def build(request: BuildRequest) -> dict:
@@ -227,14 +253,8 @@ def build(request: BuildRequest) -> dict:
         )
 
         runner.enter(Stage.CANN_CONVERT)
-        final_dir = _prepare_final_dir(runner.work_dir)
-        cann_commands = profile.cann_commands
-        if not cann_commands and profile.conversion_tool == "omg":
-            generated = build_omg_command(profile, model=onnx_path, output=final_dir / "model")
-            cann_commands = (generated,)
-        if not cann_commands:
-            raise RuntimeError("no CANN conversion command configured")
-        executor.run(cann_commands)
+        _run_cann_conversion(profile, onnx_path, runner, executor)
+        final_dir = runner.work_dir / "final"
         model_files = assemble_artifacts(source, final_dir)
         if not model_files:
             raise RuntimeError("no final artifacts found under work/final; target profile must create a deployable artifact")
