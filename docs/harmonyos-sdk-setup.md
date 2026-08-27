@@ -37,35 +37,36 @@ $ devecocli build ...                       # 需要 DevEco Studio / SDK 检测
 
 `build-profile.json5` 的 `targetSdkVersion` / `compatibleSdkVersion` 需改为你实际安装的 SDK 版本。
 
-## 3. 推荐路径（B）：Command Line Tools + ohsdkmgr（Linux/CI）
+## 3. 已确认可用的 Linux 路径：Command Line Tools（SDK 内嵌）
 
-华为官方提供 Command Line Tools，内含 `ohsdkmgr`（SDK 管理器），可在无 DevEco Studio 的机器上装 SDK。
-
-```bash
-# 1. 从华为开发者站点下载 DevEco Studio Command Line Tools（需华为账号登录）
-#    https://developer.huawei.com/consumer/cn/doc/deveco-studio/ide-commandline-get
-#    解压后包含 ohsdkmgr / hvigor / ohpm 等。
-
-# 2. 用 ohsdkmgr 安装目标 API 的 SDK，例如：
-./ohsdkmgr install --product HarmonyOS --version <api-version>
-./ohsdkmgr sdk-version                       # 查看已安装版本
-# 详细用法见：
-#   https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/ide-command-line-ohsdkmgr
-
-# 3. 导出 SDK 根目录，devecocli 的 build/run 会用 DEVECO_SDK_HOME
-export DEVECO_SDK_HOME=/path/to/ohos-sdk
-```
-
-> 说明：`ohsdkmgr install` 需要华为账号登录（下载与授权）。这一授权动作必须由你本人完成，我无法代做。
-
-## 4. 安装完成后验证
+> 你已提供 `commandline-tools-linux-x64-6.1.1.300.zip`（HarmonyOS 6.1.1 / API 24），**SDK 内嵌**在归档中，无需单独的 `ohsdkmgr`。
 
 ```bash
-devecocli --version
-devecocli device list                 # 应能列出真机/模拟器
+# 1. 解压（约 6.5 GB）
+unzip commandline-tools-linux-x64-6.1.1.300.zip -d /home/jat/Develop/deveco-clt
+
+# 2. 配置环境（或 source harmony-llm-runtime/build-env.sh）
+export DEVECO_SDK_HOME=/home/jat/Develop/deveco-clt/command-line-tools/sdk
+export DEVECO_NODE_HOME=/home/jat/Develop/deveco-clt/command-line-tools/tool/node
+export PATH=/home/jat/Develop/deveco-clt/command-line-tools/bin:$DEVECO_NODE_HOME/bin:$PATH
+
+# 3. 安装依赖（ohpm 走公开仓库）
 cd harmony-llm-runtime
-devecocli build --modules entry --build-mode debug
+ohpm install
+
+# 4. 构建
+hvigorw --mode project -p product=default -p buildMode=debug assembleApp
 ```
+
+**已实测：** 原生模块（OHOS Clang 交叉编译）与 ArkTS 均在 Linux 上编译通过；唯一需要的是最终 HAP 打包/签名用的 **Java**（`spawn java ENOENT`）。请安装一个 JRE/JDK 并让 `java` 在 PATH 上（DevEco Studio 自带，CLT 不附带）。
+
+> 注意：`devecocli`（DevEco Studio 检测）在 Linux 上不可用；直接用上面这套 `hvigorw` / `ohpm` 即可。`devecocli` 只在 Windows/Mac 下用于真机/模拟器。
+
+## 4. 版本与产物
+
+- 工具链版本：`HarmonyOS 6.1.1.300`（hvigor 6.24.4、ohpm 6.1.2.285、API 24）。
+- 项目 `build-profile.json5` 已设为 `targetSdkVersion`/`compatibleSdkVersion = 6.1.1(24)`。
+- 产物：`entry/build/default/outputs/default/**/entry-default-signed.hap`。
 
 ## 5. 本机可独立验证的部分（无需 SDK）
 
