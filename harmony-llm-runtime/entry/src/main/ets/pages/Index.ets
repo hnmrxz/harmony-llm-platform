@@ -39,8 +39,8 @@ struct Index {
 
   loadModel(): string {
     // Import the .hllm into the store, then load it by id.
-    const id = llmEngine.importmodel(HLLM_TO_IMPORT);
-    const result = id === 'IMPORT_FAILED' ? '导入失败' : llmEngine.loadmodel(id);
+    const id: string = llmEngine.importmodel(HLLM_TO_IMPORT);
+    const result: string = id === 'IMPORT_FAILED' ? '导入失败' : llmEngine.loadmodel(id);
     this.messages.push({ role: 'assistant', text: result });
     return result;
   }
