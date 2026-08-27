@@ -1,9 +1,9 @@
 {
-  "modelVersion": "5.0.0",
+  "modelVersion": "6.0.2",
   "description": "HarmonyOS local LLM runtime that consumes .hllm packages through the CANN LLM Engine.",
   "dependencies": {},
   "devDependencies": {
-    "@ohos/hypium": "1.0.19",
+    "@ohos/hypium": "1.0.25",
     "@ohos/hamock": "1.0.0"
   }
 }
