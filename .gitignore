@@ -9,13 +9,26 @@ venv/
 # Runtime host-test artifacts
 harmony-llm-runtime/test/*.hllm
 
-# HarmonyOS / DevEco build outputs
-harmony-llm-runtime/entry/build/
-harmony-llm-runtime/entry/.preview/
-harmony-llm-runtime/entry/oh_modules/
-harmony-llm-runtime/.hvigor/
-harmony-llm-runtime/build/
-harmony-llm-runtime/**/build/
+# Large downloaded toolchain archives (do not track)
+commandline-tools*.zip
+
+# HarmonyOS / DevEco build outputs (from the official CLI template)
+oh_modules/
+.node_modules/
+/oh_modules
+/local.properties
+/.idea
+.hvigor/
+**/build
+entry/build/
+entry/.preview/
+.cxx/
+**/oh_modules
+/.clangd
+/.clang-format
+/.clang-tidy
+**/.test
+/.appanalyzer
 *.hap
 *.hsp
 *.app

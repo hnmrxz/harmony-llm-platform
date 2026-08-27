@@ -1,10 +1,6 @@
 {
   "string": [
     {
-      "name": "app_name",
-      "value": "HarmonyOS LLM Runtime"
-    },
-    {
       "name": "module_desc",
       "value": "Local LLM runtime that imports .hllm packages and runs them on the CANN LLM Engine."
     },

@@ -5,9 +5,9 @@
       {
         "name": "default",
         "signingConfig": "default",
-        // Adjust the SDK version to the installed DevEco SDK target.
-        "targetSdkVersion": "5.0.5(17)",
-        "compatibleSdkVersion": "5.0.5(17)",
+        // Matches the bundled Command Line Tools SDK (HarmonyOS 6.1.1, API 24).
+        "targetSdkVersion": "6.1.1(24)",
+        "compatibleSdkVersion": "6.1.1(24)",
         "runtimeOS": "HarmonyOS",
         "buildOption": {
           "strictMode": {
