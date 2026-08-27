@@ -11,6 +11,13 @@ quantization:
 
 export:
   format: onnx
+  mode: cann_static
+  precision: fp32
+  opset: 11
+  ir_version: 6
+  batch_size: 1
+  sequence_length: 4
+  external_data: true
   command: []
 
 cann:
