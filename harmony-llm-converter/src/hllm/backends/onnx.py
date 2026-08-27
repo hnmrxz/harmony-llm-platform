@@ -64,8 +64,6 @@ def _export_with_torch(
 
     wrapper = LogitsWrapper(model)
     with torch.no_grad():
-        # PyTorch 2.x/2.13 uses ``external_data``.  The old
-        # ``use_external_data_format`` keyword is not part of the current API.
         torch.onnx.export(
             wrapper,
             (input_ids, attention_mask, position_ids),
@@ -105,24 +103,33 @@ def _set_ir_version_preserving_external_data(path: Path, ir_version: int | None)
     path.write_bytes(model.SerializeToString())
 
 
-def _validate_external_files(path: Path) -> None:
+def _collect_external_locations(path: Path) -> list[str]:
     import onnx
 
     model = onnx.load(str(path), load_external_data=False)
-    missing: list[str] = []
+    locations: list[str] = []
     for initializer in model.graph.initializer:
         for entry in initializer.external_data:
             if entry.key == "location":
-                candidate = (path.parent / entry.value).resolve()
-                try:
-                    candidate.relative_to(path.parent.resolve())
-                except ValueError as exc:
-                    raise RuntimeError(f"ONNX_EXTERNAL_DATA_ESCAPE: {entry.value}") from exc
-                if not candidate.is_file():
-                    missing.append(entry.value)
+                locations.append(entry.value)
                 break
+    return sorted(set(locations))
+
+
+def _validate_external_files(path: Path) -> None:
+    locations = _collect_external_locations(path)
+    root = path.parent.resolve()
+    missing: list[str] = []
+    for location in locations:
+        candidate = (root / location).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise RuntimeError(f"ONNX_EXTERNAL_DATA_ESCAPE: {location}") from exc
+        if not candidate.is_file():
+            missing.append(location)
     if missing:
-        raise RuntimeError(f"ONNX_EXTERNAL_DATA_MISSING: {sorted(set(missing))}")
+        raise RuntimeError(f"ONNX_EXTERNAL_DATA_MISSING: {missing}")
 
 
 def export_qwen_onnx(
@@ -161,9 +168,9 @@ def export_qwen_onnx(
     )
 
     if mode == "cann_static":
-        # External-data payloads are owned by the exporter and must be preserved
-        # verbatim. Re-saving an unloaded ModelProto can corrupt the payload links.
         if external_data:
+            # Do not run onnxsim or onnx.save on a model containing unloaded external tensors.
+            # Preserve every exporter-created weight file byte-for-byte.
             _validate_external_files(output)
             _set_ir_version_preserving_external_data(output, ir_version)
         else:
@@ -179,12 +186,19 @@ def audit_onnx(
     expected_ir: int | None = None,
     require_static: bool = False,
 ) -> dict[str, Any]:
-    """Audit ONNX metadata and external data without loading tensor payloads."""
+    """Audit ONNX metadata and external data without loading tensor payloads in Python."""
     import onnx
 
     model_path = Path(path).expanduser().resolve()
     model = onnx.load(str(model_path), load_external_data=False)
-    onnx.checker.check_model(model, full_check=False)
+
+    # Validate external-data references ourselves first. Then ask ONNX checker to
+    # resolve the model from its path so it can locate external payloads relative
+    # to the protobuf file. Passing an unloaded ModelProto to check_model() is
+    # invalid for external-data models and raises the exact "should be stored in
+    # ... but it is not regular file" ValidationError seen in production.
+    _validate_external_files(model_path)
+    onnx.checker.check_model(str(model_path), full_check=False)
 
     dynamic_inputs: list[str] = []
     for value in model.graph.input:
@@ -195,12 +209,7 @@ def audit_onnx(
     opset = next((item.version for item in model.opset_import if item.domain == ""), None)
     node_counts = Counter(node.op_type for node in model.graph.node)
     external = sum(bool(initializer.external_data) for initializer in model.graph.initializer)
-    external_locations: list[str] = []
-    for initializer in model.graph.initializer:
-        for entry in initializer.external_data:
-            if entry.key == "location":
-                external_locations.append(entry.value)
-                break
+    external_locations = _collect_external_locations(model_path)
 
     errors: list[str] = []
     if expected_opset is not None and opset != expected_opset:
@@ -209,12 +218,6 @@ def audit_onnx(
         errors.append(f"ir_version={model.ir_version}, expected={expected_ir}")
     if require_static and dynamic_inputs:
         errors.append(f"dynamic_inputs={dynamic_inputs}")
-    missing_external = [
-        location for location in sorted(set(external_locations))
-        if not (model_path.parent / location).is_file()
-    ]
-    if missing_external:
-        errors.append(f"missing_external_data={missing_external}")
 
     return {
         "path": str(model_path),
@@ -227,7 +230,7 @@ def audit_onnx(
         "inputs": [value.name for value in model.graph.input],
         "outputs": [value.name for value in model.graph.output],
         "op_types": dict(node_counts),
-        "external_locations": sorted(set(external_locations)),
+        "external_locations": external_locations,
         "ok": not errors,
         "errors": errors,
     }
