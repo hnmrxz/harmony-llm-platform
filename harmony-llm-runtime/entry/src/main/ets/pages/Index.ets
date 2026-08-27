@@ -1,6 +1,9 @@
 import { promptAction } from '@kit.ArkUI';
-import llmEngine from 'libentry.so';
+import { common } from '@kit.AbilityKit';
+import { picker } from '@kit.CoreFileKit';
+import { fileIo as fs } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import llmEngine from 'libentry.so';
 
 const DOMAIN = 0x0000;
 
@@ -9,24 +12,25 @@ interface ChatMessage {
   text: string;
 }
 
-/*
- * The model store root on device (app sandbox files dir). The runtime imports
- * a `.hllm` into this store and loads the engine files by model id.
- */
-const MODEL_STORE = '/data/storage/el2/base/files/models';
-const HLLM_TO_IMPORT = '/data/storage/el2/base/files/imports/qwen3-8b.hllm';
-
 @Entry
 @Component
 struct Index {
   @State messages: ChatMessage[] = [];
   @State input: string = '';
-  @State loading: string = '';
   @State streamText: string = '';
+  @State currentModel: string = '';
   private scroller: Scroller = new Scroller();
 
+  private appContext(): common.UIAbilityContext {
+    return getContext(this) as common.UIAbilityContext;
+  }
+
+  private modelStore(): string {
+    return `${this.appContext().filesDir}/models`;
+  }
+
   aboutToAppear(): void {
-    llmEngine.init(MODEL_STORE);
+    llmEngine.init(this.modelStore());
     // Register the streaming token callback once.
     llmEngine.answerget((token: string) => {
       Promise.resolve().then(() => {
@@ -37,12 +41,42 @@ struct Index {
     });
   }
 
-  loadModel(): string {
-    // Import the .hllm into the store, then load it by id.
-    const id: string = llmEngine.importmodel(HLLM_TO_IMPORT);
-    const result: string = id === 'IMPORT_FAILED' ? '导入失败' : llmEngine.loadmodel(id);
-    this.messages.push({ role: 'assistant', text: result });
-    return result;
+  /*
+   * Pick a local `.hllm` with the system file picker, copy it into the app
+   * sandbox (native fopen needs a real path, not an SAF URI), then import and
+   * load it through the native model store.
+   */
+  async pickModelFile(): Promise<void> {
+    try {
+      const documentPicker = new picker.DocumentViewPicker(this.appContext());
+      const result = await documentPicker.select({
+        fileSuffixFilters: ['.hllm'],
+        maxSelectNumber: 1,
+      });
+      const uri: string = result[0] ?? '';
+      if (uri === '') {
+        promptAction.showToast({ message: '未选择文件', duration: 1500 });
+        return;
+      }
+
+      const destDir: string = `${this.appContext().filesDir}/imports`;
+      fs.mkdirSync(destDir, true);
+      const dest: string = `${destDir}/model_${Date.now()}.hllm`;
+      fs.copyFileSync(uri, dest);
+      hilog.info(DOMAIN, 'HLLM', 'picked model: %{public}s', dest);
+
+      this.loadFromStore(dest);
+    } catch (err) {
+      hilog.error(DOMAIN, 'HLLM', 'pickModelFile failed: %{public}s', JSON.stringify(err));
+      promptAction.showToast({ message: '模型文件选择失败', duration: 1500 });
+    }
+  }
+
+  private loadFromStore(path: string): void {
+    const id: string = llmEngine.importmodel(path);
+    const msg: string = id === 'IMPORT_FAILED' ? '导入失败' : llmEngine.loadmodel(id);
+    this.currentModel = id === 'IMPORT_FAILED' ? '' : id;
+    this.messages.push({ role: 'assistant', text: msg });
   }
 
   /*
@@ -86,9 +120,9 @@ struct Index {
         .textAlign(TextAlign.Start)
 
       Row({ space: 8 }) {
-        Button('加载模型')
-          .onClick(() => this.loadModel())
-        Button('清空')
+        Button('选择模型文件')
+          .onClick(() => this.pickModelFile())
+        Button(this.currentModel !== '' ? `已加载: ${this.currentModel}` : '清空')
           .onClick(() => {
             this.messages = [];
             this.streamText = '';
