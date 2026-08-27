@@ -5,6 +5,7 @@ from hllm.pipeline.build import BuildRequest, build
 
 
 def _model(root: Path, dtype: str = "bfloat16") -> Path:
+    root.mkdir(parents=True, exist_ok=True)
     (root / "config.json").write_text(
         json.dumps({"model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"], "torch_dtype": dtype}),
         encoding="utf-8",
