@@ -8,7 +8,7 @@ from pathlib import Path
 
 from hllm.backends.commands import ExternalCommandError
 from hllm.backends.omg import build_omg_command
-from hllm.backends.onnx import export_qwen_onnx
+from hllm.backends.onnx import audit_onnx, export_qwen_onnx, write_audit
 from hllm.config import BuildProfile, load_profile
 from hllm.download.huggingface import download_model
 from hllm.models.adapters import default_registry
@@ -97,8 +97,25 @@ def _export_onnx_if_needed(source: Path, work_dir: Path, profile: BuildProfile, 
     if adapter_family != "qwen":
         raise RuntimeError("automatic ONNX export is currently implemented only for Qwen")
     output = work_dir / "export" / "model.onnx"
-    logger(f"onnx_export=automatic path={output}")
-    return export_qwen_onnx(source, output)
+    logger(
+        f"onnx_export=automatic mode={profile.export_mode} opset={profile.export_opset} "
+        f"ir={profile.export_ir_version or 'producer-default'} batch={profile.export_batch_size} "
+        f"sequence={profile.export_sequence_length} precision={profile.export_precision}"
+    )
+    try:
+        return export_qwen_onnx(
+            source,
+            output,
+            mode=profile.export_mode,
+            opset=profile.export_opset,
+            ir_version=profile.export_ir_version,
+            batch_size=profile.export_batch_size,
+            sequence_length=profile.export_sequence_length,
+            precision=profile.export_precision,
+            external_data=profile.export_external_data,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"ONNX_EXPORT_FAILED: {exc}") from exc
 
 
 def build(request: BuildRequest) -> dict:
@@ -128,9 +145,11 @@ def build(request: BuildRequest) -> dict:
             if not resource_ok:
                 resource_error = "INSUFFICIENT_DISK" if available_disk < estimate.recommended_disk_bytes else "INSUFFICIENT_RAM"
                 if not request.dry_run:
-                    return {"status": "failed", "stage": Stage.PLAN.value, "error": resource_error,
-                            "required_ram_bytes": estimate.recommended_ram_bytes, "available_ram_bytes": available_ram,
-                            "required_disk_bytes": estimate.recommended_disk_bytes, "available_disk_bytes": available_disk}
+                    return {
+                        "status": "failed", "stage": Stage.PLAN.value, "error": resource_error,
+                        "required_ram_bytes": estimate.recommended_ram_bytes, "available_ram_bytes": available_ram,
+                        "required_disk_bytes": estimate.recommended_disk_bytes, "available_disk_bytes": available_disk,
+                    }
 
         options = BuildOptions(source=str(source), output_dir=profile.output_dir, target_chip=profile.target_chip,
                                quantization=profile.quantization, context_length=profile.context_length, revision=source_id)
@@ -148,20 +167,29 @@ def build(request: BuildRequest) -> dict:
 
         if request.dry_run:
             stages = [Stage.DOWNLOAD, Stage.INSPECT, Stage.PLAN]
-            if not (metadata.is_fp8 and profile.supports_fp8_input): stages.append(Stage.QUANTIZE)
+            if not (metadata.is_fp8 and profile.supports_fp8_input):
+                stages.append(Stage.QUANTIZE)
             stages.extend([Stage.EXPORT, Stage.CANN_CONVERT, Stage.VALIDATE, Stage.PACKAGE])
             if profile.conversion_tool == "omg":
-                runner.state.record(f"cann_command={profile.conversion_tool} framework={profile.framework} target={profile.cann_target} platform={profile.platform}")
-            return {"status": "success", "dry_run": True, "model": metadata.name, "adapter": match.family,
-                    "dtype": metadata.dtype, "inventory": asdict(inventory), "resource_estimate": asdict(estimate) if estimate else None,
-                    "resource_ok": resource_ok, "resource_warning": resource_error, "stages": [stage.value for stage in stages],
-                    "logs": runner.state.logs}
+                runner.state.record(
+                    f"cann_command={profile.conversion_tool} framework={profile.framework} "
+                    f"target={profile.cann_target} platform={profile.platform} "
+                    f"export_mode={profile.export_mode} opset={profile.export_opset}"
+                )
+            return {
+                "status": "success", "dry_run": True, "model": metadata.name, "adapter": match.family,
+                "dtype": metadata.dtype, "inventory": asdict(inventory),
+                "resource_estimate": asdict(estimate) if estimate else None,
+                "resource_ok": resource_ok, "resource_warning": resource_error,
+                "stages": [stage.value for stage in stages], "logs": runner.state.logs,
+            }
 
         context = ExecutionContext(model=source, work=runner.work_dir, output=runner.dist_dir,
                                    target=profile.target_chip, quant=profile.quantization)
         executor = StageExecutor(context, logger=runner.state.record)
         if not (metadata.is_fp8 and profile.supports_fp8_input):
-            runner.enter(Stage.QUANTIZE); executor.run(profile.quantization_commands)
+            runner.enter(Stage.QUANTIZE)
+            executor.run(profile.quantization_commands)
         else:
             runner.state.record("skip=quantize reason=fp8_input")
 
@@ -169,6 +197,20 @@ def build(request: BuildRequest) -> dict:
         if profile.export_command:
             executor.run((profile.export_command,))
         onnx_path = _export_onnx_if_needed(source, runner.work_dir, profile, match.family, runner.state.record)
+
+        onnx_audit = audit_onnx(
+            onnx_path,
+            expected_opset=profile.export_opset if profile.export_mode == "cann_static" else None,
+            expected_ir=profile.export_ir_version if profile.export_mode == "cann_static" else None,
+            require_static=profile.export_mode == "cann_static",
+        )
+        write_audit(runner.work_dir / "export" / "onnx-audit.json", onnx_audit)
+        if not onnx_audit["ok"]:
+            raise RuntimeError(f"ONNX_PREFLIGHT_FAILED: {onnx_audit['errors']}")
+        runner.state.record(
+            f"onnx_audit=ok opset={onnx_audit['opset']} ir={onnx_audit['ir_version']} "
+            f"nodes={onnx_audit['nodes']} initializers={onnx_audit['initializers']}"
+        )
 
         runner.enter(Stage.CANN_CONVERT)
         cann_commands = profile.cann_commands
@@ -185,14 +227,16 @@ def build(request: BuildRequest) -> dict:
             raise RuntimeError("no final artifacts found under work/final; target profile must create a deployable artifact")
 
         runner.enter(Stage.VALIDATE)
-        manifest = Manifest(schema_version="1.0",
+        manifest = Manifest(
+            schema_version="1.0",
             model=ModelInfo(name=metadata.name, family=match.family, architecture=metadata.architecture or "unknown",
                             source_type="huggingface" if source_id else "local", source_id=source_id or str(source)),
             quantization=QuantizationInfo(type="fp8" if metadata.is_fp8 else profile.quantization,
                                           bits=8 if metadata.is_fp8 else profile.bits),
             target=TargetInfo(backend="cann", chip=profile.target_chip, runtime_version=profile.runtime_version),
             runtime=RuntimeInfo(context_length=profile.context_length),
-            build=BuildInfo(converter_version="0.1.0", python_version=sys.version.split()[0]))
+            build=BuildInfo(converter_version="0.1.0", python_version=sys.version.split()[0]),
+        )
         runner.enter(Stage.PACKAGE)
         package_name = f"{metadata.name}-{profile.target_chip}-{'fp8' if metadata.is_fp8 else profile.quantization}.hllm"
         package_path = runner.dist_dir / package_name
@@ -203,5 +247,7 @@ def build(request: BuildRequest) -> dict:
         (runner.dist_dir / "build.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         return result
     except ExternalCommandError as exc:
-        return {"status": "failed", "error": "EXTERNAL_COMMAND_FAILED", "command": list(exc.result.argv),
-                "exit_code": exc.result.returncode, "stderr": exc.result.stderr, "stdout": exc.result.stdout}
+        return {
+            "status": "failed", "error": "EXTERNAL_COMMAND_FAILED", "command": list(exc.result.argv),
+            "exit_code": exc.result.returncode, "stderr": exc.result.stderr, "stdout": exc.result.stdout,
+        }
