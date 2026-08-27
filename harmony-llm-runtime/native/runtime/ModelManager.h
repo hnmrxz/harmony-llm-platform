@@ -39,6 +39,14 @@ public:
     bool ImportPackage(const std::string& hllmPath, std::string& modelId,
                        std::vector<std::string>& errors);
 
+    /* Install a model from a folder on disk:
+     *   - a folder that is an extracted `.hllm` (has manifest.json), or
+     *   - a folder of pre-converted CANN engine files (an .omc + SubGraph_0.weight
+     *     + context.json + executor.json + tokenizer.json + embedding files).
+     * In the latter case a manifest.json is generated into the installed copy. */
+    bool ImportFolder(const std::string& folderPath, std::string& modelId,
+                      std::vector<std::string>& errors);
+
     bool SetState(const std::string& modelId, ModelState state);
 
     bool GetModel(const std::string& modelId, InstalledModel& out) const;

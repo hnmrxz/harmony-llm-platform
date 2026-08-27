@@ -2,6 +2,7 @@
 //   .hllm (deflate ZIP) -> ZipReader::ExtractAll -> PackageReader::ReadManifest
 //   -> VerifyIntegrity -> LocateEngineFiles.
 // Built with a plain host g++ against native/ (no OHOS NAPI dependency).
+#include <sys/stat.h>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -94,6 +95,45 @@ int main(int argc, char** argv) {
     EngineFiles loadedFiles;
     check(reloaded.GetEngineFiles(modelId, loadedFiles) && !loadedFiles.omcPath.empty(),
           "loaded engine files from store");
+
+    // 5. ImportFolder from an extracted .hllm (folder with manifest.json).
+    const std::string extractedDir = package + ".ex";
+    ZipReader z2;
+    z2.Open(package);
+    z2.ExtractAll(extractedDir);
+    ModelManager folderStore(store + ".folder");
+    std::string folderId;
+    errors.clear();
+    check(folderStore.ImportFolder(extractedDir, folderId, errors),
+          "importfolder(extracted .hllm folder)");
+    for (const auto& e : errors) {
+        std::printf("    err: %s\n", e.c_str());
+    }
+    check(!folderId.empty() && folderStore.GetEngineFiles(folderId, loadedFiles) &&
+              !loadedFiles.omcPath.empty(),
+          "folder model loaded from store");
+
+    // 6. ImportFolder from a raw folder of pre-converted CANN files (no manifest).
+    const std::string rawDir = package + ".raw";
+    ::mkdir(rawDir.c_str(), 0755);
+    auto writeFile = [&](const std::string& rel, const char* data, size_t n) {
+        FILE* f = fopen((rawDir + "/" + rel).c_str(), "wb");
+        fwrite(data, 1, n, f);
+        fclose(f);
+    };
+    writeFile("qwen.omc", "OMC", 3);
+    writeFile("context.json", "{}", 2);
+    writeFile("executor.json", "{}", 2);
+    writeFile("tokenizer.json", "{}", 2);
+    ModelManager rawStore(store + ".raw");
+    std::string rawId;
+    errors.clear();
+    check(rawStore.ImportFolder(rawDir, rawId, errors), "importfolder(raw CANN files folder)");
+    check(!rawId.empty(), "raw folder model id assigned");
+    // The generated manifest must exist in the installed copy.
+    EngineFiles rawFiles;
+    check(rawStore.GetEngineFiles(rawId, rawFiles) && !rawFiles.contextJsonPath.empty(),
+          "raw folder engine files located");
 
     if (failures == 0) {
         std::printf("ALL PASS\n");

@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "../model_package/Json.h"
+#include "../model_package/Sha256.h"
 #include "../model_package/ZipReader.h"
 
 namespace hllm {
@@ -57,6 +58,175 @@ std::string JoinPath(const std::string& base, const std::string& rel) {
         return base + rel;
     }
     return base + "/" + rel;
+}
+
+bool FileIsRegular(const std::string& p) {
+    struct stat st;
+    return ::stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
+void CollectFiles(const std::string& dir, const std::string& relPrefix,
+                  std::vector<std::string>& out) {
+    DIR* d = ::opendir(dir.c_str());
+    if (d == nullptr) {
+        return;
+    }
+    struct dirent* e;
+    while ((e = ::readdir(d)) != nullptr) {
+        if (std::strcmp(e->d_name, ".") == 0 || std::strcmp(e->d_name, "..") == 0) {
+            continue;
+        }
+        std::string child = dir + "/" + e->d_name;
+        std::string rel = relPrefix.empty() ? e->d_name : relPrefix + "/" + e->d_name;
+        struct stat st;
+        if (::lstat(child.c_str(), &st) != 0) {
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            CollectFiles(child, rel, out);
+        } else if (S_ISREG(st.st_mode)) {
+            out.push_back(rel);
+        }
+    }
+    ::closedir(d);
+}
+
+bool CopyDirRecursive(const std::string& src, const std::string& dst) {
+    if (!MkDir(dst)) {
+        return false;
+    }
+    DIR* d = ::opendir(src.c_str());
+    if (d == nullptr) {
+        return false;
+    }
+    struct dirent* e;
+    while ((e = ::readdir(d)) != nullptr) {
+        if (std::strcmp(e->d_name, ".") == 0 || std::strcmp(e->d_name, "..") == 0) {
+            continue;
+        }
+        std::string s = src + "/" + e->d_name;
+        std::string dt = dst + "/" + e->d_name;
+        struct stat st;
+        if (::lstat(s.c_str(), &st) != 0) {
+            ::closedir(d);
+            return false;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            if (!CopyDirRecursive(s, dt)) {
+                ::closedir(d);
+                return false;
+            }
+        } else if (S_ISREG(st.st_mode)) {
+            std::string bytes;
+            if (!PackageReader::ReadFile(s, bytes)) {
+                ::closedir(d);
+                return false;
+            }
+            FILE* f = fopen(dt.c_str(), "wb");
+            if (f == nullptr) {
+                ::closedir(d);
+                return false;
+            }
+            bool ok = bytes.empty() || fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size();
+            fclose(f);
+            if (!ok) {
+                ::closedir(d);
+                return false;
+            }
+        }
+    }
+    ::closedir(d);
+    return true;
+}
+
+bool WriteFileText(const std::string& p, const std::string& data) {
+    FILE* f = fopen(p.c_str(), "wb");
+    if (f == nullptr) {
+        return false;
+    }
+    bool ok = data.empty() || fwrite(data.data(), 1, data.size(), f) == data.size();
+    fclose(f);
+    return ok;
+}
+
+std::string SerializeManifest(const Manifest& m) {
+    json::Value root = json::Value::Object();
+    root.set("schema_version", json::Value::String("1.0"));
+    json::Value model = json::Value::Object();
+    model.set("name", json::Value::String(m.model.name));
+    model.set("family", json::Value::String(m.model.family));
+    model.set("architecture", json::Value::String(m.model.architecture));
+    root.set("model", std::move(model));
+    json::Value target = json::Value::Object();
+    target.set("backend", json::Value::String(m.target.backend));
+    target.set("chip", json::Value::String(m.target.chip));
+    target.set("runtime_version", json::Value::String(m.target.runtime_version));
+    root.set("target", std::move(target));
+    json::Value arts = json::Value::Array();
+    for (const auto& a : m.artifacts) {
+        json::Value ja = json::Value::Object();
+        ja.set("type", json::Value::String(a.type));
+        ja.set("path", json::Value::String(a.path));
+        ja.set("sha256", json::Value::String(a.sha256));
+        ja.set("size", json::Value::Number(static_cast<double>(a.size)));
+        arts.push(std::move(ja));
+    }
+    root.set("artifacts", std::move(arts));
+    return json::Serialize(root);
+}
+
+bool BuildManifestFromFolder(const std::string& folder, Manifest& manifest,
+                             std::vector<std::string>& errors) {
+    std::vector<std::string> files;
+    CollectFiles(folder, "", files);
+    bool hasOmc = false;
+    bool hasCtx = false;
+    bool hasExec = false;
+    bool hasTok = false;
+    std::size_t slash = folder.find_last_of('/');
+    std::string name = slash == std::string::npos ? folder : folder.substr(slash + 1);
+
+    manifest = Manifest{};
+    manifest.schemaVersion = "1.0";
+    manifest.model.name = name;
+    manifest.model.family = "prepacked";
+    manifest.model.architecture = "prepacked";
+    manifest.target.backend = "cann_llm_engine";
+
+    for (const auto& rel : files) {
+        std::string abs = JoinPath(folder, rel);
+        std::string bytes;
+        if (!PackageReader::ReadFile(abs, bytes)) {
+            errors.push_back("unreadable: " + rel);
+            return false;
+        }
+        Artifact a;
+        a.type = "resource";
+        a.path = rel;
+        a.sha256 = Sha256Hex(bytes);
+        a.size = bytes.size();
+        bool isOmc = rel.size() > 4 && rel.substr(rel.size() - 4) == ".omc";
+        if (isOmc) {
+            a.type = "model";
+            hasOmc = true;
+        }
+        if (rel == "context.json") {
+            hasCtx = true;
+        } else if (rel == "executor.json") {
+            hasExec = true;
+        } else if (rel == "tokenizer.json") {
+            hasTok = true;
+        }
+        manifest.artifacts.push_back(std::move(a));
+    }
+
+    if (!hasOmc || !hasCtx || !hasExec || !hasTok) {
+        errors.push_back(
+            "folder missing required CANN engine files (.omc / context.json / "
+            "executor.json / tokenizer.json)");
+        return false;
+    }
+    return true;
 }
 
 }  // namespace
@@ -210,6 +380,66 @@ bool ModelManager::ImportPackage(const std::string& hllmPath, std::string& model
         }
         RmRecursive(staging);
         return false;
+    }
+    RmRecursive(backup);
+
+    InstalledModel model;
+    model.id = modelId;
+    model.name = manifest.model.name;
+    model.family = manifest.model.family;
+    model.targetChip = manifest.target.chip;
+    model.state = ModelState::Installed;
+    models_[modelId] = model;
+    SaveIndex();
+    return true;
+}
+
+bool ModelManager::ImportFolder(const std::string& folderPath, std::string& modelId,
+                                std::vector<std::string>& errors) {
+    if (!DirExists(folderPath)) {
+        errors.push_back("folder does not exist");
+        return false;
+    }
+    Manifest manifest;
+    bool hasManifest = FileIsRegular(JoinPath(folderPath, "manifest.json"));
+    if (hasManifest) {
+        // An extracted .hllm (manifest.json + artifacts).
+        if (!PackageReader::ReadManifest(folderPath, manifest, errors)) {
+            return false;
+        }
+        errors.clear();
+        if (!PackageReader::VerifyIntegrity(folderPath, manifest, errors)) {
+            return false;
+        }
+    } else {
+        // A folder of pre-converted CANN engine files: build a manifest.
+        if (!BuildManifestFromFolder(folderPath, manifest, errors)) {
+            return false;
+        }
+    }
+
+    modelId = SanitizeId(manifest.model.name);
+    std::string finalDir = JoinPath(JoinPath(installRoot_, "installed"), modelId);
+    std::string backup = JoinPath(installRoot_, ".old_" + modelId);
+    RmRecursive(backup);
+    if (DirExists(finalDir)) {
+        if (::rename(finalDir.c_str(), backup.c_str()) != 0) {
+            errors.push_back("cannot replace existing install");
+            return false;
+        }
+    }
+    if (!CopyDirRecursive(folderPath, finalDir)) {
+        errors.push_back("cannot install folder");
+        if (DirExists(backup)) {
+            ::rename(backup.c_str(), finalDir.c_str());
+        }
+        return false;
+    }
+    if (!hasManifest) {
+        if (!WriteFileText(JoinPath(finalDir, "manifest.json"), SerializeManifest(manifest))) {
+            errors.push_back("cannot write manifest to installed copy");
+            return false;
+        }
     }
     RmRecursive(backup);
 

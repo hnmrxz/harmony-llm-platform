@@ -118,6 +118,29 @@ napi_value ImportModel(napi_env env, napi_callback_info info) {
     return result;
 }
 
+napi_value ImportFolder(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    if (argc < 1) {
+        napi_value result;
+        napi_create_string_utf8(env, "invalid arguments", NAPI_AUTO_LENGTH, &result);
+        return result;
+    }
+    size_t len = 0;
+    napi_get_value_string_utf8(env, args[0], nullptr, 0, &len);
+    std::string folderPath(len, '\0');
+    napi_get_value_string_utf8(env, args[0], &folderPath[0], len + 1, &len);
+
+    std::string modelId;
+    std::vector<std::string> errors;
+    bool ok = EnsureModels()->ImportFolder(folderPath, modelId, errors);
+
+    napi_value result;
+    napi_create_string_utf8(env, ok ? modelId.c_str() : "IMPORT_FAILED", NAPI_AUTO_LENGTH, &result);
+    return result;
+}
+
 napi_value LoadModel(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value args[1];
@@ -217,6 +240,7 @@ napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
         {"init", nullptr, InitModels, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"importmodel", nullptr, ImportModel, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"importfolder", nullptr, ImportFolder, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"loadmodel", nullptr, LoadModel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"modelinfer", nullptr, ModelInfer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"answerget", nullptr, AnswerGet, nullptr, nullptr, nullptr, napi_default, nullptr},

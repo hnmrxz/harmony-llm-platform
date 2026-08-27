@@ -80,6 +80,42 @@ struct Index {
   }
 
   /*
+   * Import a *folder* of pre-converted CANN engine files. The system picker has
+   * no folder mode, so the user selects the model marker file (an .omc) within
+   * the folder; we copy it into a sandbox folder and import that directory. The
+   * runtime's native ImportFolder builds a manifest and installs the model, so
+   * the sibling files (.omc / SubGraph_0.weight / context.json / executor.json /
+   * tokenizer.json) must be present in the same folder.
+   */
+  async pickModelFolder(): Promise<void> {
+    try {
+      const documentPicker = new picker.DocumentViewPicker(this.appContext());
+      const result = await documentPicker.select({
+        fileSuffixFilters: ['.omc'],
+        maxSelectNumber: 1,
+      });
+      const uri: string = result[0] ?? '';
+      if (uri === '') {
+        promptAction.showToast({ message: '未选择文件', duration: 1500 });
+        return;
+      }
+      const destDir: string = `${this.appContext().filesDir}/imports/folder_${Date.now()}`;
+      fs.mkdirSync(destDir, true);
+      const dest: string = `${destDir}/model.omc`;
+      fs.copyFileSync(uri, dest);
+      hilog.info(DOMAIN, 'HLLM', 'picked model folder marker: %{public}s', dest);
+
+      const id: string = llmEngine.importfolder(destDir);
+      const msg: string = id === 'IMPORT_FAILED' ? '导入失败' : llmEngine.loadmodel(id);
+      this.currentModel = id === 'IMPORT_FAILED' ? '' : id;
+      this.messages.push({ role: 'assistant', text: msg });
+    } catch (err) {
+      hilog.error(DOMAIN, 'HLLM', 'pickModelFolder failed: %{public}s', JSON.stringify(err));
+      promptAction.showToast({ message: '模型文件夹导入失败', duration: 1500 });
+    }
+  }
+
+  /*
    * Apply the chat template (string-level) before handing the text to the
    * engine. The CANN LLM Engine tokenizes the resulting text internally, so no
    * tokenizer work is needed here. Replace with the model's own template.
@@ -120,8 +156,10 @@ struct Index {
         .textAlign(TextAlign.Start)
 
       Row({ space: 8 }) {
-        Button('选择模型文件')
+        Button('导入模型文件(.hllm)')
           .onClick(() => this.pickModelFile())
+        Button('导入模型文件夹')
+          .onClick(() => this.pickModelFolder())
         Button(this.currentModel !== '' ? `已加载: ${this.currentModel}` : '清空')
           .onClick(() => {
             this.messages = [];
