@@ -9,6 +9,7 @@ from pathlib import Path
 class Stage(StrEnum):
     DOWNLOAD = "download"
     INSPECT = "inspect"
+    PLAN = "plan"
     QUANTIZE = "quantize"
     EXPORT = "export"
     CANN_CONVERT = "cann_convert"
