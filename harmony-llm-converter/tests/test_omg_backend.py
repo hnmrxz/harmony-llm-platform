@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from hllm.backends import omg
 from hllm.backends.omg import build_omg_command, prepare_omg_output
 from hllm.config import BuildProfile
 
@@ -47,11 +48,25 @@ def test_prepare_omg_output_rejects_directory(tmp_path: Path) -> None:
         prepare_omg_output(output)
 
 
-def test_build_omg_command_uses_kirinx90(tmp_path: Path) -> None:
+def test_build_omg_command_normalizes_model_before_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     model = tmp_path / "model.onnx"
     model.write_bytes(b"onnx")
+    calls: list[tuple[str, Path]] = []
+
+    monkeypatch.setattr(
+        omg,
+        "_normalize_external_data_metadata",
+        lambda path: calls.append(("external", path)) or {"changed": 0},
+    )
+    monkeypatch.setattr(
+        omg,
+        "normalize_onnx_node_names",
+        lambda path: calls.append(("names", path)) or {"changed": 0},
+    )
+
     command = build_omg_command(_profile(), model=model, output=tmp_path / "out" / "model")
 
+    assert calls == [("external", model.resolve()), ("names", model.resolve())]
     assert command[0] == "omg"
     assert "--framework=5" in command
     assert "--target=omc" in command
