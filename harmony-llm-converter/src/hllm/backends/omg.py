@@ -7,15 +7,7 @@ from hllm.config import BuildProfile
 
 
 def prepare_omg_output(output: Path) -> Path:
-    """Prepare an OMG output prefix without pre-creating the result file.
-
-    The DDK OMG tool expects ``--output`` to be a new output prefix.  Older
-    GraphEngine builds validate the path with ``realpath`` but do not require
-    the leaf itself to exist.  Pre-creating the leaf (for example with
-    ``touch``) causes the same DDK builds to reject the output as invalid.
-    Existing regular files/symlinks from a previous failed build are removed;
-    directories are rejected because they are never valid OMG output leaves.
-    """
+    """Return a clean, non-existing output prefix for OMG."""
     output = output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
